@@ -1,0 +1,9 @@
+[package]
+name = "sentinel-controls"
+version = "0.1.0"
+edition = "2021"
+description = "Response controls for agent degradation — tiered intervention from pause to termination"
+
+[dependencies]
+sentinel-types = { path = "../sentinel-types" }
+libc = "0.2"

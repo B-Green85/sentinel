@@ -1,0 +1,16 @@
+[package]
+name = "sentinel-py"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 bindings for Sentinel agent oversight — wraps sentinel-core via sentinel-types"
+
+[lib]
+name = "_sentinel_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+sentinel-types = { path = "../sentinel-types", features = ["python"] }
+sentinel-core = { path = "../sentinel-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
