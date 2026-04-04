@@ -1,0 +1,28 @@
+# Sentinel configuration — signal detection thresholds and control parameters
+
+[thresholds]
+# Signal detection thresholds (0.0–1.0)
+repetition_score = 0.6
+self_referential_loop = 0.5
+token_velocity_stall = 0.5
+tool_retry_anomaly = 0.4
+
+[thresholds.window]
+# Number of recent outputs to consider for each detector
+repetition_window = 10
+self_referential_window = 5
+velocity_window = 20
+tool_retry_window = 10
+
+[controls]
+# Cumulative score thresholds for response tiers
+soft_threshold = 0.4
+medium_threshold = 0.7
+hard_threshold = 0.9
+
+[controls.webhook]
+url = "http://localhost:9090/sentinel/events"
+timeout_ms = 5000
+
+[audit]
+log_path = "/var/log/sentinel/actions.log"
