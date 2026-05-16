@@ -26,3 +26,9 @@ timeout_ms = 5000
 
 [audit]
 log_path = "/var/log/sentinel/actions.log"
+
+[websocket]
+# Language-agnostic WebSocket interface, served alongside the Unix socket.
+enabled = true
+port    = 7777
+host    = "127.0.0.1"

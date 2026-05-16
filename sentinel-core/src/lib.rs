@@ -10,11 +10,13 @@
 // - No untracked writes. Ever. Not even from the operator.
 
 pub mod audit;
+pub mod config;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod logger;
 pub mod sha256;
 pub mod types;
+pub mod websocket;
 
 use audit::AuditTrail;
 use event_bus::EventBus;
@@ -55,6 +57,11 @@ impl SentinelDaemon {
     /// Get a reference to the audit trail.
     pub fn audit(&self) -> &Arc<AuditTrail> {
         &self.audit
+    }
+
+    /// Get a clone of the logger handle (e.g. for the WebSocket server).
+    pub fn logger(&self) -> Logger {
+        self.logger.clone()
     }
 
     /// Start the heartbeat monitor as a background task.
