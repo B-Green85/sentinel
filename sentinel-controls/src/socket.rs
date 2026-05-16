@@ -302,11 +302,24 @@ mod tests {
     use sentinel_types::ControlThresholds;
     use std::fs;
 
+    /// Monotonic counter so each test gets its own audit-log and socket
+    /// paths — tests run in parallel and each deletes its own files.
+    fn unique_suffix() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     fn test_engine_and_socket() -> (OverrideSocket, std::path::PathBuf) {
         let dir = std::env::temp_dir().join("sentinel_socket_test");
         let _ = fs::create_dir_all(&dir);
-        let audit_path = dir.join(format!("socket_audit_{}.log", std::process::id()));
-        let socket_path = dir.join(format!("test_{}.sock", std::process::id()));
+        let suffix = unique_suffix();
+        let audit_path = dir.join(format!("socket_audit_{}.log", suffix));
+        let socket_path = dir.join(format!("test_{}.sock", suffix));
 
         let engine = ControlEngine::new(
             ControlThresholds::default(),

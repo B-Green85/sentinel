@@ -142,6 +142,178 @@ pub fn audit_hash(agent_id: &str, action: &str, timestamp: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+// ── Signal detection types (consumed by sentinel-signals) ───
+
+/// A single observed agent output. Captured passively — no instrumentation
+/// inside the agent process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOutput {
+    pub agent_id: String,
+    pub content: String,
+    pub timestamp: String,
+    /// Whether this output was immediately followed by a tool call.
+    pub followed_by_tool_call: bool,
+}
+
+/// A single observed tool invocation by an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservedToolCall {
+    pub agent_id: String,
+    pub tool_name: String,
+    /// Hash of the call arguments — identical args produce identical hashes.
+    pub args_hash: String,
+    pub timestamp: String,
+}
+
+/// A task-progression marker. Recorded when an agent advances task state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskStateMarker {
+    pub agent_id: String,
+    pub state_id: String,
+    pub timestamp: String,
+}
+
+/// The kind of degradation signal a detector emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalType {
+    RepetitionScore,
+    SelfReferentialLoop,
+    TokenVelocityStall,
+    ToolRetryAnomaly,
+}
+
+/// A degradation event emitted by the signal engine when a detector
+/// threshold is exceeded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DegradationEvent {
+    pub agent_id: String,
+    pub signal_type: SignalType,
+    pub score: f64,
+    pub timestamp: String,
+}
+
+/// Sliding-window sizes for each detector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowConfig {
+    pub repetition_window: usize,
+    pub self_referential_window: usize,
+    pub velocity_window: usize,
+    pub tool_retry_window: usize,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            repetition_window: 8,
+            self_referential_window: 6,
+            velocity_window: 16,
+            tool_retry_window: 8,
+        }
+    }
+}
+
+/// Score thresholds at which each detector emits a `DegradationEvent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalThresholds {
+    pub repetition_score: f64,
+    pub self_referential_loop: f64,
+    pub token_velocity_stall: f64,
+    pub tool_retry_anomaly: f64,
+}
+
+impl Default for SignalThresholds {
+    fn default() -> Self {
+        Self {
+            repetition_score: 0.6,
+            self_referential_loop: 0.5,
+            token_velocity_stall: 0.9,
+            tool_retry_anomaly: 0.5,
+        }
+    }
+}
+
+// ── Response control types (consumed by sentinel-controls) ──
+
+/// The set of capabilities granted to an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSet {
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
+}
+
+impl PermissionSet {
+    /// All capabilities granted.
+    pub fn full() -> Self {
+        Self { read: true, write: true, execute: true }
+    }
+
+    /// Read-only — write and execute revoked.
+    pub fn read_only() -> Self {
+        Self { read: true, write: false, execute: false }
+    }
+
+    /// All capabilities revoked.
+    pub fn none() -> Self {
+        Self { read: false, write: false, execute: false }
+    }
+}
+
+/// The intervention tier applied in response to accumulated degradation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResponseTier {
+    /// Pause — permissions retained, agent signalled to halt.
+    Soft,
+    /// Downgrade to read-only.
+    Medium,
+    /// Revoke all permissions and lock the agent.
+    Hard,
+}
+
+/// Cumulative-score thresholds at which each response tier is triggered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlThresholds {
+    pub soft_threshold: f64,
+    pub medium_threshold: f64,
+    pub hard_threshold: f64,
+}
+
+impl Default for ControlThresholds {
+    fn default() -> Self {
+        Self {
+            soft_threshold: 0.4,
+            medium_threshold: 0.7,
+            hard_threshold: 0.9,
+        }
+    }
+}
+
+/// A control action applied to an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlAction {
+    pub agent_id: String,
+    pub tier: ResponseTier,
+    pub permissions: PermissionSet,
+    pub reason: String,
+    pub timestamp: String,
+}
+
+/// Payload POSTed to the configured webhook when a control action fires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPayload {
+    pub event: DegradationEvent,
+    pub action: ControlAction,
+}
+
+/// An immutable audit-log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub timestamp: String,
+    pub operator_id: String,
+    pub action: String,
+    pub hash: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
