@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "sentinel-types",
+    "sentinel-signals",
+    "sentinel-controls",
+    "sentinel-core",
+    "sentinel-ui",
+]
+resolver = "2"
