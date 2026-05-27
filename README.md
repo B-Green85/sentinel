@@ -236,7 +236,7 @@ The tool that governs agents was built under agent governance. That is not a coi
 
 ---
 
-## CDMAE Principles
+## CDMAD Principles
 
 1. **Generation is optional. Verification is not.**
 2. **Never self-certify.**

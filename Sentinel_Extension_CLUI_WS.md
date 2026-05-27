@@ -202,7 +202,7 @@ Either outcome is useful data.
 
 ---
 
-## CDMAE Alignment
+## CDMAD Alignment
 
 - **Generation is optional. Verification is not.** — WS messages verified same as Unix socket messages
 - **Never self-certify.** — UI is read-only. Operator overrides still require explicit action and are always logged
