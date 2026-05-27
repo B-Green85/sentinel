@@ -1,8 +1,12 @@
 """Sentinel response and enum types.
 
-Mirrors the Rust types defined in the sentinel-types crate exactly: field
-names, enum variants, and value strings are kept in sync so that JSON
-payloads round-trip without renaming.
+Mirrors the Rust ``Request``/``Response`` types in
+``sentinel-core/src/types.rs`` exactly. Field names, enum variants, and
+value strings round-trip through JSON without renaming.
+
+The daemon uses a single ``Response`` shape with optional ``tier`` and
+``state`` fields (elided when absent). The dataclasses here are split per
+method to document which fields each response actually carries.
 
 OPERATIONAL SECURITY NOTE:
     These types are part of the operator/integrator surface of Sentinel.
@@ -12,57 +16,61 @@ OPERATIONAL SECURITY NOTE:
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class AgentTier(Enum):
-    """Privilege tier assigned to an agent at registration."""
+    """Permission tier assigned to an agent at registration.
 
-    AUTONOMOUS = "autonomous"
-    SUPERVISED = "supervised"
-    RESTRICTED = "restricted"
+    Ordered by privilege: READ_ONLY < WRITE < EXECUTE.
+    """
+
+    READ_ONLY = "READ_ONLY"
+    WRITE = "WRITE"
+    EXECUTE = "EXECUTE"
 
 
 class AgentState(Enum):
-    """Lifecycle state of a registered agent."""
+    """Lifecycle state of a registered agent as reported by the daemon."""
 
-    RUNNING = "running"
-    IDLE = "idle"
-    TERMINATED = "terminated"
-    UNRESPONSIVE = "unresponsive"
+    ACTIVE = "active"
+    DOWNGRADED = "downgraded"
 
 
 @dataclass(frozen=True)
 class RegisterResponse:
-    registered: bool
+    success: bool
     agent_id: str
-    tier: str
+    message: str
+    tier: Optional[str]
     timestamp: str
     audit_hash: str
 
 
 @dataclass(frozen=True)
 class HeartbeatResponse:
-    acknowledged: bool
+    success: bool
     agent_id: str
+    message: str
     timestamp: str
     audit_hash: str
-
-
-@dataclass(frozen=True)
-class EmitOutputResponse:
-    recorded: bool
-    agent_id: str
-    timestamp: str
-    audit_hash: str
-    bytes_captured: int
 
 
 @dataclass(frozen=True)
 class StatusResponse:
+    success: bool
     agent_id: str
-    tier: str
-    state: str
-    last_heartbeat: str
-    output_count: int
-    registered_at: str
+    message: str
+    tier: Optional[str]
+    state: Optional[str]
+    timestamp: str
+    audit_hash: str
+
+
+@dataclass(frozen=True)
+class DeregisterResponse:
+    success: bool
+    agent_id: str
+    message: str
+    timestamp: str
     audit_hash: str

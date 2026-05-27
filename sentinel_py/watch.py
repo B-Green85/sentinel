@@ -21,6 +21,11 @@ from ._types import StatusResponse
 class Watch:
     """Register an agent for the lifetime of a ``with`` block.
 
+    ``tier`` accepts the daemon's tier strings: ``"READ_ONLY"``,
+    ``"WRITE"``, or ``"EXECUTE"``. ``heartbeat_interval`` is in seconds
+    and is rounded to an integer before being sent (the daemon's wire
+    type is ``u64``).
+
     OPERATIONAL SECURITY NOTE: operator/integrator surface only — never
     expose to a watched agent's runtime.
     """
@@ -28,7 +33,7 @@ class Watch:
     def __init__(
         self,
         agent_id: str,
-        tier: str = "supervised",
+        tier: str = "WRITE",
         heartbeat_interval: float = 5.0,
     ) -> None:
         self.agent_id = agent_id
@@ -38,7 +43,11 @@ class Watch:
         self._thread: Optional[threading.Thread] = None
 
     def __enter__(self) -> "Watch":
-        _client.register(self.agent_id, self.tier)
+        _client.register(
+            agent_id=self.agent_id,
+            permission_tier=self.tier,
+            heartbeat_interval=int(self.heartbeat_interval),
+        )
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._heartbeat_loop,
@@ -65,9 +74,16 @@ class Watch:
             except Exception:
                 pass
 
-    def emit(self, text: str):
-        """Record a chunk of agent output to the audit log."""
-        return _client.emit_output(self.agent_id, text)
+    def emit(self, text: str) -> None:
+        """No-op kept for API parity.
+
+        The Sentinel daemon does not ingest agent output over the Unix
+        socket — output capture is handled by its process harness via
+        stdout/stderr interception. This method exists so operator
+        scripts written against earlier API drafts continue to run; it
+        performs no socket I/O.
+        """
+        del text
 
     def check_status(self) -> StatusResponse:
         """Fetch the current oversight status for this watch."""

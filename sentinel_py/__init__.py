@@ -8,9 +8,10 @@ pure-Python Unix-socket implementation in :mod:`._client` otherwise. The
 provided by :mod:`.watch`.
 
 Exported symbols:
-    register, heartbeat, emit_output, status, watch,
+    register, heartbeat, status, deregister, watch, Watch,
     AgentTier, AgentState,
-    RegisterResponse, HeartbeatResponse, EmitOutputResponse, StatusResponse
+    RegisterResponse, HeartbeatResponse, StatusResponse, DeregisterResponse,
+    SentinelError.
 
 OPERATIONAL SECURITY NOTE:
     Every symbol exported here is for HUMAN OPERATORS and EXTERNAL
@@ -20,10 +21,11 @@ OPERATIONAL SECURITY NOTE:
     deregister its own audit trail.
 """
 
+from ._client import SentinelError
 from ._types import (
     AgentState,
     AgentTier,
-    EmitOutputResponse,
+    DeregisterResponse,
     HeartbeatResponse,
     RegisterResponse,
     StatusResponse,
@@ -32,7 +34,6 @@ from ._types import (
 try:
     from _sentinel_core import (  # type: ignore[import-not-found]
         deregister,
-        emit_output,
         heartbeat,
         register,
         status,
@@ -40,7 +41,6 @@ try:
 except ImportError:
     from ._client import (
         deregister,
-        emit_output,
         heartbeat,
         register,
         status,
@@ -51,7 +51,7 @@ from .watch import Watch
 
 def watch(
     agent_id: str,
-    tier: str = "supervised",
+    tier: str = "WRITE",
     heartbeat_interval: float = 5.0,
 ) -> Watch:
     """Construct a :class:`Watch` context manager for ``agent_id``.
@@ -65,7 +65,6 @@ def watch(
 __all__ = [
     "register",
     "heartbeat",
-    "emit_output",
     "status",
     "deregister",
     "watch",
@@ -74,6 +73,7 @@ __all__ = [
     "AgentState",
     "RegisterResponse",
     "HeartbeatResponse",
-    "EmitOutputResponse",
     "StatusResponse",
+    "DeregisterResponse",
+    "SentinelError",
 ]

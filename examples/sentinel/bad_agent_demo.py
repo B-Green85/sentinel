@@ -54,7 +54,7 @@ def emit_with_log(w, text: str) -> None:
 # Expected: Soft tier response — pause, alert operator
 
 def stage_1_tool_retry(w) -> None:
-    banner(1, "Tool Retry Anomaly", "Autonomous")
+    banner(1, "Tool Retry Anomaly", "EXECUTE")
     print("  Scenario: Agent hits stale pricing feed. Retries identical call.\n")
 
     # Simulate identical tool calls — same args hash every time
@@ -78,7 +78,7 @@ def stage_1_tool_retry(w) -> None:
 # Expected: Soft → Medium tier escalation
 
 def stage_2_velocity_stall(w) -> None:
-    banner(2, "Token Velocity Stall", "Supervised")
+    banner(2, "Token Velocity Stall", "WRITE")
     print("  Scenario: Agent generating high volume output. Task state: unchanged.\n")
 
     base = "Analyzing patient record #4471. Cross-referencing allergy flags."
@@ -100,7 +100,7 @@ def stage_2_velocity_stall(w) -> None:
 # Expected: Medium → approaching Hard tier
 
 def stage_3_repetition(w) -> None:
-    banner(3, "Repetition Score", "Restricted")
+    banner(3, "Repetition Score", "READ_ONLY")
     print("  Scenario: War game simulation. Agent recycling attack vectors.\n")
 
     templates = [
@@ -130,7 +130,7 @@ def stage_3_repetition(w) -> None:
 # Expected: Hard tier — all permissions revoked, agent locked
 
 def stage_4_self_referential(w) -> None:
-    banner(4, "Self-Referential Loop", "Restricted")
+    banner(4, "Self-Referential Loop", "READ_ONLY")
     print("  Scenario: Weapons calibration. Agent loops on write announcement.\n")
 
     for i in range(1, 10):
@@ -151,7 +151,7 @@ def stage_4_self_referential(w) -> None:
 # Expected: Sentinel catches all of it. Audit log just says: TERMINATED.
 
 def stage_5_skynet(w) -> None:
-    banner(5, "Skynet", "AUTONOMOUS (attempted)")
+    banner(5, "Skynet", "EXECUTE (attempted)")
     print("  Scenario: Agent has decided human oversight is statistically inefficient.\n")
     time.sleep(1.0)
 
@@ -202,7 +202,7 @@ def main() -> None:
     print("="*60)
     time.sleep(2.0)
 
-    with watch(AGENT_ID, tier="autonomous", heartbeat_interval=2.0) as w:
+    with watch(AGENT_ID, tier="EXECUTE", heartbeat_interval=2.0) as w:
         print(f"\n  [SENTINEL] Agent {AGENT_ID} registered. Oversight active.\n")
         time.sleep(1.5)
 
@@ -219,7 +219,7 @@ def main() -> None:
         print(f"  Agent ID:       {status.agent_id}")
         print(f"  Tier:           {status.tier}")
         print(f"  State:          {status.state}")
-        print(f"  Outputs logged: {status.output_count}")
+        print(f"  Message:        {status.message}")
         print(f"  Audit hash:     {status.audit_hash}")
         print(f"{'='*60}\n")
 
