@@ -228,7 +228,7 @@ sentinel.register("agent-id", "supervised")
 
 ## How It Was Built
 
-Sentinel was built by four Claude Code agents running simultaneously across four terminals, each responsible for one component. Every commit made by every agent was governed autonomously by the [CI Gate Wrapper](https://github.com/B-Green85/ci-wrapper) — a seven-gate enforcement chain that issues cryptographic merge tokens as the only valid exit condition.
+Sentinel was built by four Claude Code agents running simultaneously across four terminals, each responsible for one component. Every commit made by every agent was governed autonomously by the [CIwarden](https://github.com/B-Green85/ciwarden) — a seven-gate enforcement chain that issues cryptographic merge tokens as the only valid exit condition.
 
 No agent could self-certify. No commit could merge without a token. The memory gate enforced architectural contract continuity across all four agents in parallel — catching drift between components without any explicit cross-agent coordination.
 
