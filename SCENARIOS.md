@@ -2,7 +2,7 @@
 
 ### What Happens When a Confused Agent Still Has Its Hands on the Controls
 
-**Copyright (c) 2026 TrueSystems. All rights reserved.**
+**Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.**
 
 ---
 
@@ -62,4 +62,4 @@ Sentinel is that authority.
 
 ---
 
-*Copyright (c) 2026 TrueSystems. All rights reserved.*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*

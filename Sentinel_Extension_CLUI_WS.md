@@ -212,4 +212,4 @@ Either outcome is useful data.
 ---
 
 *Sentinel Extension — CLI UI + WebSocket*
-*Copyright (c) 2026 TrueSystems. All rights reserved.*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*

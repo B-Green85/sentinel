@@ -1,5 +1,5 @@
 # Sentinel — Services & CLI Reference
-### TrueSystems | Updated: 2026-05-16
+### Brandon Green | Updated: 2026-05-16
 
 ---
 
@@ -327,4 +327,4 @@ ls Cargo.toml   # must exist
 ---
 
 *Sentinel — Agentic Process Oversight*
-*Copyright (c) 2026 TrueSystems. All rights reserved.*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*

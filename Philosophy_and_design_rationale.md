@@ -1,6 +1,6 @@
 # Sentinel — Philosophy & Design Rationale
 
-**Copyright (c) 2026 TrueSystems LLC. All rights reserved.**
+**Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.**
 
 ---
 
@@ -153,7 +153,7 @@ Operators who identify novel degradation signatures in their deployment context 
 
 The community builds the library. Sentinel applies it.
 
-No contributed signal pack modifies Sentinel's core. The core remains the property of TrueSystems LLC. The signal packs are the commons.
+No contributed signal pack modifies Sentinel's core. The core remains open source under the Apache 2.0 License. The signal packs are the commons.
 
 ---
 
@@ -191,6 +191,6 @@ Sentinel is that authority.
 
 ---
 
-*Copyright (c) 2026 TrueSystems LLC. All rights reserved.*
-*Sentinel is a TrueSystems LLC product developed under the CDMAE methodology.*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+*Sentinel is open source software developed under the CDMAE methodology.*
 *Golem Linux runtime integration documented separately in GOLEM_RUNTIME_ARCHITECTURE.md*
