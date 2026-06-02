@@ -2,7 +2,7 @@
 
 ### Agentic Process Oversight Daemon
 
-**Copyright (c) 2026 TrueSystems. All rights reserved.**
+**Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.**
 
 ---
 
@@ -246,4 +246,4 @@ The tool that governs agents was built under agent governance. That is not a coi
 ---
 
 *Sentinel — Agentic Process Oversight*
-*Copyright (c) 2026 TrueSystems. All rights reserved.*# test
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
