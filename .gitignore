@@ -2,3 +2,12 @@
 target/
 **/__pycache__/
 *.pyc
+
+# sentinel-keygen output — secrets, never committed (the manifest is the only
+# committed artifact).
+/etc/sentinel/sentinel.allowlist
+/etc/sentinel/sentinel.signing.key
+/etc/sentinel/sentinel.signing.pub
+/etc/sentinel/sentinel.install.json
+/etc/sentinel/*.key.*
+/etc/sentinel/*.pub.*

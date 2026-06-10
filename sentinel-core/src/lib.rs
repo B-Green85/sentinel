@@ -11,6 +11,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod ebpf;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod logger;
@@ -25,10 +26,23 @@ use logger::Logger;
 use types::{AgentRecord, Event, Request, Response, now_timestamp};
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+
+/// Derive the cryptographic audit-chain path from the daemon log path: the
+/// sibling `actions.log` (matching the `[audit] log_path` convention in
+/// sentinel.toml). The human-readable daemon log and the tamper-evident audit
+/// chain are separate files.
+fn audit_log_path(log_path: &str) -> PathBuf {
+    let p = Path::new(log_path);
+    match p.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("actions.log"),
+        _ => PathBuf::from("actions.log"),
+    }
+}
 
 /// The Sentinel daemon. All state is internal — invisible to agents.
 pub struct SentinelDaemon {
@@ -41,10 +55,11 @@ pub struct SentinelDaemon {
 impl SentinelDaemon {
     pub fn new(log_path: &str) -> Self {
         let logger = Logger::start(log_path);
+        let audit_path = audit_log_path(log_path);
         Self {
             agents: Arc::new(Mutex::new(HashMap::new())),
             event_bus: EventBus::new(256).into_shared(),
-            audit: AuditTrail::new().into_shared(),
+            audit: AuditTrail::open(&audit_path).into_shared(),
             logger,
         }
     }

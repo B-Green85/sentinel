@@ -28,7 +28,18 @@ timeout_ms = 5000
 log_path = "/var/log/sentinel/actions.log"
 
 [websocket]
-# Language-agnostic WebSocket interface, served alongside the Unix socket.
+# Language-agnostic WebSocket interface, served alongside the primary transport.
 enabled = true
 port    = 7777
 host    = "127.0.0.1"
+
+[transport]
+# OS-agnostic transport selection (Agent 3).
+#   type      — auto | unix | pipe
+#               auto picks the native transport for the build target
+#               (Unix socket on Linux/macOS, named pipe on Windows).
+#   path      — Unix domain socket path (used by unix / auto-on-unix).
+#   pipe_name — Windows named pipe (used by pipe / auto-on-windows).
+type      = "auto"
+path      = "/tmp/sentinel.sock"
+pipe_name = "\\\\.\\pipe\\sentinel"

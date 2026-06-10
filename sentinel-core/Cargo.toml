@@ -8,9 +8,15 @@ description = "Sentinel agent oversight daemon — persistent background process
 name = "sentinel-core"
 path = "src/main.rs"
 
+[[bin]]
+name = "sentinel-verify"
+path = "src/bin/sentinel-verify.rs"
+
 [dependencies]
+sentinel-types = { path = "../sentinel-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

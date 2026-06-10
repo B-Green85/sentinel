@@ -5,12 +5,13 @@
 //                 [--config /path/to/sentinel.toml]
 //
 // Defaults:
-//   socket: /tmp/sentinel.sock
+//   socket: /tmp/sentinel.sock   (overrides [transport].path)
 //   log:    /var/log/sentinel/agents.log
 //   config: sentinel.toml
 //
 // Interfaces (both speak the same JSON message protocol):
-//   - Unix socket  — local integrators
+//   - Transport    — Unix socket / named pipe / kernel IPC, selected by the
+//                    [transport] config block (see transport::create_transport)
 //   - WebSocket    — language-agnostic clients, ws://host:port from config
 //
 // systemd unit example:
@@ -28,6 +29,7 @@
 //   WantedBy=multi-user.target
 
 use sentinel_core::config::Config;
+use sentinel_core::transport::create_transport;
 use sentinel_core::websocket::WsServer;
 use sentinel_core::SentinelDaemon;
 use std::sync::Arc;
@@ -50,14 +52,18 @@ async fn main() -> std::io::Result<()> {
     let log_path = parse_arg(&args, "--log", "/var/log/sentinel/agents.log");
     let config_path = parse_arg(&args, "--config", "sentinel.toml");
 
-    let config = Config::load(&config_path);
+    let mut config = Config::load(&config_path);
+    // The `--socket` flag continues to drive the Unix transport path, so
+    // existing invocations behave identically.
+    config.transport.path = std::path::PathBuf::from(&socket_path);
+
     let daemon = Arc::new(SentinelDaemon::new(&log_path));
 
     // Start heartbeat monitor (checks every second).
     daemon.start_heartbeat_monitor(1);
 
-    // Start the WebSocket server alongside the Unix socket — it shares the
-    // same audit trail, logger and event bus. Connectivity only; the
+    // Start the WebSocket server alongside the primary transport — it shares
+    // the same audit trail, logger and event bus. Connectivity only; the
     // governance constraints are identical on both interfaces.
     if config.websocket.enabled {
         let ws = WsServer::new(
@@ -73,6 +79,11 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    // Serve on Unix socket (blocks forever — systemd manages lifecycle).
-    daemon.serve(&socket_path).await
+    // Serve over the configured transport (blocks forever — systemd manages
+    // lifecycle).
+    let transport = create_transport(&config);
+    daemon
+        .serve_transport(transport)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }

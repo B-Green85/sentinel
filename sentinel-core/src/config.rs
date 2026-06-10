@@ -5,6 +5,7 @@
 // blocks remain valid and untouched — this struct reads, never rewrites.
 
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// Top-level sentinel.toml view.
 #[derive(Debug, Clone, Deserialize)]
@@ -13,6 +14,7 @@ pub struct Config {
     pub websocket: WebsocketConfig,
     pub thresholds: Thresholds,
     pub controls: Controls,
+    pub transport: TransportConfig,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
             websocket: WebsocketConfig::default(),
             thresholds: Thresholds::default(),
             controls: Controls::default(),
+            transport: TransportConfig::default(),
         }
     }
 }
@@ -85,6 +88,52 @@ impl Default for Controls {
     }
 }
 
+/// `[transport]` block — selects the OS-agnostic transport (Agent 3).
+///
+/// ```toml
+/// [transport]
+/// type = "auto"              # auto | unix | pipe
+/// path = "/tmp/sentinel.sock"
+/// pipe_name = "\\\\.\\pipe\\sentinel"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TransportConfig {
+    #[serde(rename = "type")]
+    pub transport_type: TransportType,
+    pub path: PathBuf,
+    pub pipe_name: String,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            transport_type: TransportType::Auto,
+            path: PathBuf::from("/tmp/sentinel.sock"),
+            pipe_name: r"\\.\pipe\sentinel".to_string(),
+        }
+    }
+}
+
+/// Which transport implementation to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportType {
+    /// Pick the native transport for the build target (Unix socket on
+    /// Linux/macOS, named pipe on Windows).
+    Auto,
+    /// Force the Unix domain socket transport.
+    Unix,
+    /// Force the Windows named-pipe transport.
+    Pipe,
+}
+
+impl Default for TransportType {
+    fn default() -> Self {
+        TransportType::Auto
+    }
+}
+
 impl Config {
     /// Load configuration from a TOML file. On any failure, fall back to
     /// defaults and warn — the daemon must still come up.
@@ -118,6 +167,44 @@ mod tests {
         assert_eq!(c.websocket.host, "127.0.0.1");
         assert_eq!(c.websocket.port, 7777);
         assert_eq!(c.websocket.bind_addr(), "127.0.0.1:7777");
+    }
+
+    #[test]
+    fn transport_defaults() {
+        let c = Config::default();
+        assert_eq!(c.transport.transport_type, TransportType::Auto);
+        assert_eq!(c.transport.path, PathBuf::from("/tmp/sentinel.sock"));
+        assert_eq!(c.transport.pipe_name, r"\\.\pipe\sentinel");
+    }
+
+    #[test]
+    fn parses_transport_block() {
+        let toml = r#"
+            [transport]
+            type = "unix"
+            path = "/run/sentinel.sock"
+            pipe_name = "\\\\.\\pipe\\custom"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.transport.transport_type, TransportType::Unix);
+        assert_eq!(c.transport.path, PathBuf::from("/run/sentinel.sock"));
+        assert_eq!(c.transport.pipe_name, r"\\.\pipe\custom");
+    }
+
+    #[test]
+    fn transport_partial_uses_defaults() {
+        // type given, path/pipe_name fall back to defaults
+        let c: Config = toml::from_str("[transport]\ntype = \"pipe\"\n").unwrap();
+        assert_eq!(c.transport.transport_type, TransportType::Pipe);
+        assert_eq!(c.transport.path, PathBuf::from("/tmp/sentinel.sock"));
+    }
+
+    #[test]
+    fn missing_transport_block_uses_defaults() {
+        // The legacy config (no [transport]) must still load.
+        let c: Config = toml::from_str("[websocket]\nport = 9000\n").unwrap();
+        assert_eq!(c.websocket.port, 9000);
+        assert_eq!(c.transport.transport_type, TransportType::Auto);
     }
 
     #[test]

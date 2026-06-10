@@ -1,0 +1,22 @@
+[package]
+name = "sentinel-keygen"
+version = "0.1.0"
+edition = "2021"
+description = "Generates Sentinel deployment secrets (signing keys, allowlist, install record) at install time"
+
+[[bin]]
+name = "sentinel-keygen"
+path = "src/main.rs"
+
+[dependencies]
+# sentinel-types defines the canonical binary_hash format ("sha256:<hex>") used
+# by ProcessIdentity. We match that format here; the dependency keeps the two
+# crates pinned to the same workspace version.
+sentinel-types = { path = "../sentinel-types" }
+# All deps below are already present in the workspace lockfile — no new crates.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+chrono = "0.4"
