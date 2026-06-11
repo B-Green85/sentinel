@@ -12,6 +12,12 @@ path = "src/main.rs"
 name = "sentinel-verify"
 path = "src/bin/sentinel-verify.rs"
 
+[features]
+# GolemLinux kernel-IPC transport. The real implementation is `no_std` and
+# lives in the kernel tree (src/sentinel/); `transport::KernelTransport` is a
+# trait-satisfying stub compiled only under this feature.
+kernel-transport = []
+
 [dependencies]
 sentinel-types = { path = "../sentinel-types" }
 serde = { version = "1", features = ["derive"] }

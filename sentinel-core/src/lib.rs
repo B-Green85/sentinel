@@ -12,10 +12,12 @@
 pub mod audit;
 pub mod config;
 pub mod ebpf;
+pub mod error;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod logger;
 pub mod sha256;
+pub mod transport;
 pub mod types;
 pub mod websocket;
 
@@ -293,6 +295,73 @@ impl SentinelDaemon {
                 }
             });
         }
+    }
+
+    /// Serve over an OS-agnostic [`transport::SentinelTransport`]. This is the
+    /// v3 replacement for [`SentinelDaemon::serve`]: the daemon binds via
+    /// `listen()`, then accepts connections through the trait, so the same
+    /// daemon drives Unix sockets, Windows named pipes, or kernel IPC without
+    /// change. The transport implementations are blocking, so `accept()` /
+    /// `recv()` / `send()` run on `tokio::task::spawn_blocking` while request
+    /// dispatch stays on the async runtime. Runs until an accept error or
+    /// process termination.
+    pub async fn serve_transport(
+        self: Arc<Self>,
+        transport: Box<dyn transport::SentinelTransport>,
+    ) -> Result<(), error::SentinelError> {
+        transport.listen()?;
+        self.logger
+            .info("daemon", "sentinel-core listening via transport", None);
+
+        let transport = Arc::new(transport);
+        loop {
+            // Blocking accept on the dedicated pool so the async runtime is
+            // never stalled waiting for a peer to connect.
+            let t = Arc::clone(&transport);
+            let conn = tokio::task::spawn_blocking(move || t.accept())
+                .await
+                .map_err(|e| {
+                    error::SentinelError::Transport(format!("accept task panicked: {e}"))
+                })??;
+
+            let daemon = Arc::clone(&self);
+            tokio::spawn(async move {
+                daemon.handle_connection(conn).await;
+            });
+        }
+    }
+
+    /// Handle a single accepted [`transport::Connection`]: read one request,
+    /// dispatch it, and write the JSON response. Mirrors the one-shot
+    /// request/response cycle of the legacy Unix accept loop. Blocking socket
+    /// I/O is offloaded to `spawn_blocking`.
+    async fn handle_connection(self: Arc<Self>, conn: Box<dyn transport::Connection>) {
+        let conn = Arc::new(conn);
+
+        let c = Arc::clone(&conn);
+        let bytes = match tokio::task::spawn_blocking(move || c.recv()).await {
+            Ok(Ok(b)) if !b.is_empty() => b,
+            _ => return,
+        };
+
+        let response = match serde_json::from_slice::<Request>(&bytes) {
+            Ok(req) => self.handle_request(req).await,
+            Err(e) => {
+                let resp = Response {
+                    success: false,
+                    agent_id: String::new(),
+                    message: format!("parse error: {e}"),
+                    tier: None,
+                    state: None,
+                    timestamp: now_timestamp(),
+                    audit_hash: String::new(),
+                };
+                serde_json::to_string(&resp).unwrap()
+            }
+        };
+
+        let c = Arc::clone(&conn);
+        let _ = tokio::task::spawn_blocking(move || c.send(response.as_bytes())).await;
     }
 }
 

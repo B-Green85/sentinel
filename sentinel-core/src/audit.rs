@@ -139,10 +139,9 @@ fn now_nanos() -> u64 {
 }
 
 fn serr(code: &str, msg: impl Into<String>) -> SentinelError {
-    SentinelError {
-        code: code.to_string(),
-        message: msg.into(),
-    }
+    // `sentinel_types::SentinelError` is now a named-variant enum; the legacy
+    // `{ code, message }` pair is folded into a `Generic` via `generic()`.
+    SentinelError::generic(code, msg.into())
 }
 
 // ───────────────────────────────────────────────────────────────────────────

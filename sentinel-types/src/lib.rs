@@ -119,15 +119,47 @@ pub struct SentinelRequest {
 }
 
 /// Error type for sentinel operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SentinelError {
-    pub code: String,
-    pub message: String,
+///
+/// v3: converted from a `{ code, message }` struct to a named-variant enum so
+/// call sites can match on specific failure modes (`UnknownProfile`,
+/// `UnsupportedPlatform`, `TransportError`). The `Generic(String)` variant
+/// preserves the prior free-form `{ code, message }` usage — the legacy `code`
+/// is folded into the message string via [`SentinelError::generic`]. Existing
+/// serde users continue to work: `Generic` carries the human-readable detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SentinelError {
+    /// Free-form error. Preserves the legacy `{ code, message }` shape; the
+    /// message carries the human-readable description.
+    Generic(String),
+    /// The named deployment profile does not exist.
+    UnknownProfile(String),
+    /// The requested operation is not supported on this platform.
+    UnsupportedPlatform,
+    /// A transport-level failure (bind / accept / listen / IPC).
+    TransportError(String),
+}
+
+impl SentinelError {
+    /// Construct a [`SentinelError::Generic`] from a stable code plus a
+    /// human-readable message, folding both into one string. Bridges call
+    /// sites written against the old `{ code, message }` struct.
+    pub fn generic(code: &str, message: impl std::fmt::Display) -> Self {
+        SentinelError::Generic(format!("{code}: {message}"))
+    }
 }
 
 impl std::fmt::Display for SentinelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SentinelError({}): {}", self.code, self.message)
+        match self {
+            SentinelError::Generic(msg) => write!(f, "SentinelError: {msg}"),
+            SentinelError::UnknownProfile(name) => {
+                write!(f, "unknown deployment profile: {name}")
+            }
+            SentinelError::UnsupportedPlatform => {
+                write!(f, "operation not supported on this platform")
+            }
+            SentinelError::TransportError(msg) => write!(f, "transport error: {msg}"),
+        }
     }
 }
 
