@@ -7,3 +7,6 @@ description = "Response controls for agent degradation — tiered intervention f
 [dependencies]
 sentinel-types = { path = "../sentinel-types" }
 libc = "0.2"
+# Async runtime — used only by notify::TelegramNotifier::notify_and_hold for the
+# hold timeout. The rest of the crate is synchronous.
+tokio = { version = "1", features = ["time", "rt", "macros"] }

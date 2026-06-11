@@ -130,6 +130,48 @@ impl ControlEngine {
         }
     }
 
+    /// Force the Soft-tier response (pause) for an agent without waiting for the
+    /// cumulative score to cross a threshold. Permissions are retained — a pause
+    /// only signals the agent to halt. Writes an audit entry; returns whether it
+    /// was written. Additive over the automatic tier logic, which is unchanged.
+    pub fn force_pause(&mut self, agent_id: &str, timestamp: &str, operator_id: &str) -> bool {
+        let entry = create_audit_entry(
+            &format!("Soft_tier_forced:{}", agent_id),
+            timestamp,
+            operator_id,
+        );
+        self.agent_permissions
+            .entry(agent_id.to_string())
+            .or_insert_with(PermissionSet::full);
+        self.audit_log.append(&entry).is_ok()
+    }
+
+    /// Force the Medium-tier response (read-only) for an agent.
+    pub fn force_restrict(&mut self, agent_id: &str, timestamp: &str, operator_id: &str) -> bool {
+        let entry = create_audit_entry(
+            &format!("Medium_tier_forced:{}", agent_id),
+            timestamp,
+            operator_id,
+        );
+        self.agent_permissions
+            .insert(agent_id.to_string(), PermissionSet::read_only());
+        self.audit_log.append(&entry).is_ok()
+    }
+
+    /// Force the Hard-tier response (revoke all permissions + permanently lock)
+    /// for an agent. Mirrors the Hard tier reached through `process_event`.
+    pub fn force_terminate(&mut self, agent_id: &str, timestamp: &str, operator_id: &str) -> bool {
+        let entry = create_audit_entry(
+            &format!("Hard_tier_forced:{}", agent_id),
+            timestamp,
+            operator_id,
+        );
+        self.agent_permissions
+            .insert(agent_id.to_string(), PermissionSet::none());
+        self.locked_agents.insert(agent_id.to_string(), true);
+        self.audit_log.append(&entry).is_ok()
+    }
+
     /// Manual override by human operator. Creates an audit entry.
     pub fn operator_override(
         &mut self,

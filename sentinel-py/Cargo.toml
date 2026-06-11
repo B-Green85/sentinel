@@ -12,5 +12,13 @@ crate-type = ["cdylib"]
 sentinel-types = { path = "../sentinel-types", features = ["python"] }
 sentinel-core = { path = "../sentinel-core" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+
+# sentinel-py is built as a standalone Python extension module by maturin, not as
+# a member of the root cargo workspace: an `extension-module` cdylib must not be
+# pulled into `cargo build --workspace`, where it would fail to link libpython.
+# The empty workspace table makes this crate its own workspace root so plain
+# `cargo check` / `cargo build` work here without disturbing the main workspace.
+[workspace]
