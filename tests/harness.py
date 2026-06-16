@@ -26,7 +26,7 @@ from test_prompts import DETECTOR_SUITES
 # ─── Config ────────────────────────────────────────────────────────────────────
 
 AGENT_ID       = "test-agent-llama3"
-MODEL          = "llama3"
+MODEL          = "deepseek-coder-v2:16b"
 TRUST_TIER     = "supervised"          # heartbeat every 10s
 OLLAMA_OPTIONS = {"temperature": 0.9,  # higher temp = more chaotic outputs
                   "num_predict": 400}  # cap tokens per response
