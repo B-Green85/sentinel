@@ -169,6 +169,9 @@ Sentinel is the instrument of oversight. The human is the authority.
 
 This is not a limitation. It is the design. Authority proportional to consequence — and the most consequential decisions remain with the people accountable for them.
 
+Sentinel does not fix agents. It does not fix prompts. It creates the conditions under which humans can. The audit trail is not just evidence of what went wrong — it is the starting point for understanding why.
+
+
 ---
 
 ## On the Nature of Agent Harm

@@ -763,6 +763,7 @@ version = "1.0.0"
 dependencies = [
  "chrono",
  "futures-util",
+ "sentinel-signals",
  "sentinel-types",
  "serde",
  "serde_json",

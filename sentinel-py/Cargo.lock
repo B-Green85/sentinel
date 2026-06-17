@@ -545,6 +545,7 @@ version = "1.0.0"
 dependencies = [
  "chrono",
  "futures-util",
+ "sentinel-signals",
  "sentinel-types",
  "serde",
  "serde_json",
@@ -563,6 +564,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tungstenite",
+]
+
+[[package]]
+name = "sentinel-signals"
+version = "0.1.0"
+dependencies = [
+ "sentinel-types",
 ]
 
 [[package]]
