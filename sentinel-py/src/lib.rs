@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 
 use pyo3::types::PyDict;
 use std::path::Path;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use sentinel_types::{
     AgentTier, AgentState,
@@ -24,12 +26,30 @@ use sentinel_types::{
 use sentinel_core::audit::verify_chain;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/sentinel.sock";
+const DEFAULT_WS_URL: &str = "ws://127.0.0.1:7777";
+
+/// In-process registry mapping `agent_id` → the trust tier the agent was last
+/// registered with over the Unix socket. Populated by `register()` and consulted
+/// by `emit_output()`'s WebSocket self-heal path so the WS plane registers an
+/// agent with the *same* tier it holds on the Unix plane — instead of a
+/// hardcoded "supervised", which previously made an autonomous agent look
+/// supervised on the WS side and in the audit trail / AGENTS pane.
+///
+/// `Mutex` guards concurrent access from multiple Python threads; last write
+/// wins (a re-register with a new tier overwrites the prior entry).
+static AGENT_TIERS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn get_socket_path() -> String {
     std::env::var("SENTINEL_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.into())
 }
 
-fn send_request(req: &SentinelRequest) -> PyResult<String> {
+/// WebSocket endpoint for the output/detection plane (overridable for tests).
+fn get_ws_url() -> String {
+    std::env::var("SENTINEL_WS_URL").unwrap_or_else(|_| DEFAULT_WS_URL.into())
+}
+
+fn send_request<T: serde::Serialize>(req: &T) -> PyResult<String> {
     let socket_path = get_socket_path();
     let mut stream = UnixStream::connect(&socket_path)
         .map_err(|e| PyRuntimeError::new_err(format!("socket connect failed: {e}")))?;
@@ -54,18 +74,74 @@ fn send_request(req: &SentinelRequest) -> PyResult<String> {
     Ok(response)
 }
 
+/// Map the Python-facing *trust tier* vocabulary onto the daemon's
+/// `RegisterRequest` shape (`permission_tier` + `heartbeat_interval`).
+///
+/// The Python API speaks in oversight terms ("supervised" / "autonomous"),
+/// but the daemon registers agents against a *permission* tier
+/// (`READ_ONLY` / `WRITE` / `EXECUTE`) and a heartbeat cadence in seconds.
+/// Raw permission-tier names are also accepted verbatim so callers may address
+/// the daemon directly. Heartbeat cadence follows the harness convention
+/// (supervised = tight 10s loop; autonomous = looser 30s loop).
+fn map_trust_tier(tier: &str) -> PyResult<(&'static str, u64)> {
+    match tier.to_ascii_uppercase().as_str() {
+        "SUPERVISED" => Ok(("WRITE", 10)),
+        "AUTONOMOUS" => Ok(("EXECUTE", 30)),
+        "READ_ONLY" | "READONLY" | "READ-ONLY" => Ok(("READ_ONLY", 30)),
+        "WRITE" => Ok(("WRITE", 30)),
+        "EXECUTE" => Ok(("EXECUTE", 30)),
+        other => Err(PyRuntimeError::new_err(format!("unknown tier: {other}"))),
+    }
+}
+
+/// Normalize any accepted `register()` tier input onto the WebSocket plane's
+/// oversight vocabulary (`autonomous` / `supervised` / `restricted`, the
+/// lowercase `WsTier` variants).
+///
+/// `register()` accepts both the trust-tier words and raw permission-tier names;
+/// the WS `register` handler only understands `WsTier`, so storing a raw name
+/// like `EXECUTE` verbatim would make the self-heal frame fail to deserialize.
+/// Mapping here keeps the WS self-heal registration always valid. Restrictive
+/// permissions (`READ_ONLY`) map to the most restrictive WS tier.
+fn ws_trust_tier(tier: &str) -> &'static str {
+    match tier.to_ascii_uppercase().as_str() {
+        "AUTONOMOUS" | "EXECUTE" => "autonomous",
+        "READ_ONLY" | "READONLY" | "READ-ONLY" => "restricted",
+        // "SUPERVISED" | "WRITE" and any future-accepted input fall back to the
+        // safe, most-common oversight default.
+        _ => "supervised",
+    }
+}
+
 /// Register an agent with Sentinel for oversight.
 #[pyfunction]
 fn register(agent_id: &str, tier: &str) -> PyResult<RegisterResponse> {
-    let req = SentinelRequest {
-        method: "register".into(),
-        agent_id: agent_id.into(),
-        tier: Some(tier.into()),
-        text: None,
-    };
+    let (permission_tier, heartbeat_interval) = map_trust_tier(tier)?;
+
+    // The daemon parses the inbound bytes as its internally-tagged `Request`
+    // enum, whose `register` variant flattens `RegisterRequest`. Emit exactly
+    // those fields — `tier`/`text` from `SentinelRequest` are not understood by
+    // the register handler and would trip its `permission_tier` requirement.
+    let req = serde_json::json!({
+        "method": "register",
+        "agent_id": agent_id,
+        "permission_tier": permission_tier,
+        "heartbeat_interval": heartbeat_interval,
+    });
     let resp = send_request(&req)?;
-    serde_json::from_str(&resp)
-        .map_err(|e| PyRuntimeError::new_err(format!("parse response failed: {e}")))
+    let parsed: RegisterResponse = serde_json::from_str(&resp)
+        .map_err(|e| PyRuntimeError::new_err(format!("parse response failed: {e}")))?;
+
+    // Registration succeeded and parsed cleanly — remember the agent's tier
+    // (normalized to the WS oversight vocabulary) so `emit_output`'s WS
+    // self-heal can register on the WebSocket plane with the *same* tier the
+    // agent holds on the Unix plane. Last write wins.
+    AGENT_TIERS
+        .lock()
+        .unwrap()
+        .insert(agent_id.to_string(), ws_trust_tier(tier).to_string());
+
+    Ok(parsed)
 }
 
 /// Send a heartbeat for a registered agent.
@@ -83,17 +159,107 @@ fn heartbeat(agent_id: &str) -> PyResult<HeartbeatResponse> {
 }
 
 /// Emit captured output for a registered agent.
+///
+/// Unlike register/heartbeat/status (Unix socket), output submission and signal
+/// detection live on the daemon's WebSocket transport (`ws://127.0.0.1:7777`).
+/// That server keeps its own agent registry, separate from the Unix-socket
+/// daemon, so the first emit for an agent self-registers it on the WebSocket
+/// side and resends — registering only once preserves the detector window
+/// across subsequent emits.
+///
+/// Fire-and-forget: the server answers with a status/degradation broadcast,
+/// not an `EmitOutputResponse`, so this returns `None` on success. The harness
+/// treats a falsy return as "no events", which is correct.
 #[pyfunction]
-fn emit_output(agent_id: &str, text: &str) -> PyResult<EmitOutputResponse> {
-    let req = SentinelRequest {
-        method: "emit_output".into(),
-        agent_id: agent_id.into(),
-        tier: None,
-        text: Some(text.into()),
-    };
-    let resp = send_request(&req)?;
-    serde_json::from_str(&resp)
-        .map_err(|e| PyRuntimeError::new_err(format!("parse response failed: {e}")))
+#[pyo3(signature = (agent_id, text, followed_by_tool=false))]
+fn emit_output(
+    agent_id: &str,
+    text: &str,
+    followed_by_tool: bool,
+) -> PyResult<Option<EmitOutputResponse>> {
+    use tungstenite::Message;
+
+    let url = get_ws_url();
+    let (mut ws, _resp) = tungstenite::connect(url.as_str())
+        .map_err(|e| PyRuntimeError::new_err(format!("websocket connect failed: {e}")))?;
+
+    // Bound blocking reads so a quiet server cannot hang the Python call.
+    if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = ws.get_ref() {
+        let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    }
+
+    let emit_msg = serde_json::json!({
+        "type": "emit_output",
+        "agent_id": agent_id,
+        "output": text,
+        // Field name matches `AgentOutput.followed_by_tool_call`. The current
+        // WebSocket emit handler ignores unknown fields, so this is forward-
+        // compatible rather than load-bearing today.
+        "followed_by_tool_call": followed_by_tool,
+    })
+    .to_string();
+
+    ws.send(Message::Text(emit_msg.clone()))
+        .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+
+    // Detect the "agent not registered" reply (WS registry is independent of
+    // the Unix-socket daemon's). Reads are bounded and tolerate the timeout.
+    let mut needs_register = false;
+    for _ in 0..8 {
+        match ws.read() {
+            Ok(Message::Text(t)) => {
+                if t.contains("not registered") && t.contains(agent_id) {
+                    needs_register = true;
+                    break;
+                }
+                // A status/degradation reply for our agent means it landed.
+                if t.contains(agent_id) {
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
+        }
+    }
+
+    if needs_register {
+        // Register on the WS plane with the tier the agent actually holds on the
+        // Unix plane (recorded by `register()`). If this agent never registered
+        // in-process (e.g. emit_output called first, or a fresh process), fall
+        // back to "supervised" — the safe, most-restrictive oversight default.
+        let tier = AGENT_TIERS
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_else(|| "supervised".to_string());
+        let register_msg = serde_json::json!({
+            "type": "register",
+            "agent_id": agent_id,
+            "tier": tier,
+        })
+        .to_string();
+        // On a single connection these frames are processed in order: register
+        // creates the WS agent, then the resent output is observed.
+        ws.send(Message::Text(register_msg))
+            .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+        ws.send(Message::Text(emit_msg))
+            .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+        for _ in 0..8 {
+            match ws.read() {
+                Ok(Message::Text(t))
+                    if t.contains(agent_id) && !t.contains("not registered") =>
+                {
+                    break
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => continue,
+            }
+        }
+    }
+
+    let _ = ws.close(None);
+    Ok(None)
 }
 
 /// Query the status of a registered agent.

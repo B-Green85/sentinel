@@ -66,6 +66,10 @@ impl std::fmt::Display for AgentState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct RegisterResponse {
+    /// The daemon emits this as `success` in its generic `Response` envelope
+    /// (see sentinel-core `types::Response`). Accept that key on deserialize
+    /// while keeping the Python-visible attribute named `registered`.
+    #[serde(alias = "success")]
     pub registered: bool,
     pub agent_id: String,
     pub tier: String,
@@ -77,6 +81,10 @@ pub struct RegisterResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct HeartbeatResponse {
+    /// Same envelope mismatch as `RegisterResponse`: the daemon emits the
+    /// generic `Response` whose boolean flag is `success`. Accept that key on
+    /// deserialize while keeping the Python attribute named `acknowledged`.
+    #[serde(alias = "success")]
     pub acknowledged: bool,
     pub agent_id: String,
     pub timestamp: String,
@@ -87,6 +95,7 @@ pub struct HeartbeatResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct EmitOutputResponse {
+    #[serde(alias = "success")]
     pub recorded: bool,
     pub agent_id: String,
     pub timestamp: String,
@@ -101,8 +110,15 @@ pub struct StatusResponse {
     pub agent_id: String,
     pub tier: String,
     pub state: String,
+    // The daemon's `handle_status` returns the generic `Response` envelope,
+    // which does not carry these three fields. Default them so `status()`
+    // deserializes cleanly instead of failing on the missing keys; the Python
+    // attribute names are unchanged.
+    #[serde(default)]
     pub last_heartbeat: String,
+    #[serde(default)]
     pub output_count: u64,
+    #[serde(default)]
     pub registered_at: String,
     pub audit_hash: String,
 }
