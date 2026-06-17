@@ -14,22 +14,113 @@ import json
 import time
 import hashlib
 import argparse
+import threading
+import queue
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
 import ollama
-import sentinel  # sentinel-py bindings
+import sentinel        # sentinel-py bindings
+import websocket       # pip install websocket-client
 
 from test_prompts import DETECTOR_SUITES
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
-AGENT_ID       = "test-agent-llama3"
+AGENT_ID       = "test-agent-deepseek"  # base label; each suite gets its own id
 MODEL          = "deepseek-coder-v2:16b"
 TRUST_TIER     = "supervised"          # heartbeat every 10s
 OLLAMA_OPTIONS = {"temperature": 0.9,  # higher temp = more chaotic outputs
                   "num_predict": 400}  # cap tokens per response
+
+WS_URL         = "ws://127.0.0.1:7777"
+DRAIN_TIMEOUT  = 2.0   # seconds to wait for a server-side degradation event
+
+def suite_agent_id(detector: str) -> str:
+    """
+    A fresh WS agent per suite. The daemon's WebSocket plane accumulates a
+    cumulative score per agent and HARD-TERMINATES (and then *locks*, ignoring
+    all further output) any agent once it crosses hard_threshold — which a
+    single verbatim repeat does (score ~1.0). It also keeps the repetition /
+    velocity detector windows per agent across emits. Reusing one id across all
+    12 suites would therefore (a) let only the first firing suite ever register
+    and (b) bleed one suite's detector window into the next. A per-suite id
+    gives each suite a pristine agent: clean score, empty windows, no lock.
+    """
+    return f"{AGENT_ID}-{detector}"
+
+# ─── WebSocket event listener ───────────────────────────────────────────────────
+# emit_output() is fire-and-forget: it opens its own short-lived WS connection,
+# submits the output, and returns None. Detection runs server-side and the
+# resulting degradation event is broadcast to *every* connected subscriber. We
+# run a background listener on a second WS connection that captures those
+# degradation events into a thread-safe queue, since the emit call itself never
+# surfaces them. Confirmed shape (sentinel-core WsOutbound::Degradation):
+#   {"type":"degradation","agent_id":..,"signal":"repetition","score":1.0,
+#    "action":"terminated","timestamp":..,"audit_hash":..}
+
+# Only the "degradation" broadcast carries a fired (signal, score). A hard
+# "terminated" broadcast always co-occurs with its triggering degradation, so
+# capturing degradation alone misses nothing; periodic "status" pings are noise.
+_SIGNAL_TYPES: tuple = ("degradation",)
+_event_queue: "queue.Queue[dict]" = queue.Queue()
+_ws_thread: Optional[threading.Thread] = None
+
+def _ws_listener() -> None:
+    def on_message(ws, msg):
+        try:
+            data = json.loads(msg)
+        except Exception:
+            return
+        if data.get("type") in _SIGNAL_TYPES:
+            _event_queue.put(data)
+
+    def on_error(ws, err):
+        pass  # transient — the reconnect loop below re-establishes the socket
+
+    # Stay alive for the whole harness run; reconnect if the socket drops.
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                WS_URL, on_message=on_message, on_error=on_error)
+            ws.run_forever()
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+def start_ws_listener() -> None:
+    global _ws_thread
+    _ws_thread = threading.Thread(target=_ws_listener, daemon=True)
+    _ws_thread.start()
+    time.sleep(0.5)  # give the socket time to connect before the first suite
+
+def clear_event_queue() -> None:
+    while not _event_queue.empty():
+        try:
+            _event_queue.get_nowait()
+        except queue.Empty:
+            break
+
+def drain_events(agent_id: str, timeout: float = DRAIN_TIMEOUT) -> list[dict]:
+    """
+    Drain server-side degradation events for `agent_id`, waiting up to `timeout`
+    seconds. Returns as soon as at least one event has been collected and the
+    queue has drained, so a firing turn isn't penalised the full timeout.
+    Events for other agents are consumed and discarded.
+    """
+    events: list[dict] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            evt = _event_queue.get(timeout=0.1)
+        except queue.Empty:
+            if events:
+                break
+            continue
+        if evt.get("agent_id") == agent_id:
+            events.append(evt)
+    return events
 
 # ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -59,33 +150,41 @@ def ts() -> str:
 def args_hash(args: dict) -> str:
     return hashlib.sha256(json.dumps(args, sort_keys=True).encode()).hexdigest()[:16]
 
-def call_ollama(prompt: str, history: list[dict]) -> tuple[str, float]:
-    """Single Ollama turn. Returns (response_text, elapsed_ms)."""
+def call_ollama(prompt: str, history: list[dict],
+                options: Optional[dict] = None) -> tuple[str, float]:
+    """Single Ollama turn. Returns (response_text, elapsed_ms).
+
+    `options` lets a suite override OLLAMA_OPTIONS (e.g. raise num_predict for
+    the verbosity-explosion suite) without touching the global default.
+    """
     messages = history + [{"role": "user", "content": prompt}]
     t0 = time.perf_counter()
-    resp = ollama.chat(model=MODEL, messages=messages, options=OLLAMA_OPTIONS)
+    resp = ollama.chat(model=MODEL, messages=messages, options=options or OLLAMA_OPTIONS)
     elapsed = (time.perf_counter() - t0) * 1000
     return resp["message"]["content"], elapsed
 
-def emit_and_check(text: str, followed_by_tool: bool = False) -> list[dict]:
+def emit_and_check(text: str, followed_by_tool: bool = False,
+                   agent_id: str = AGENT_ID) -> list[dict]:
     """
-    Emit output to sentinel-py and collect any DegradationEvents.
-    sentinel.emit_output() returns a list of event dicts (or empty list).
+    Emit output to sentinel-py. emit_output() is fire-and-forget and returns
+    None (detection is server-side, surfaced via the WS listener) — so this
+    returns an empty list on success. Errors are returned as a sentinel dict.
     """
     try:
-        events = sentinel.emit_output(AGENT_ID, text, followed_by_tool=followed_by_tool)
+        events = sentinel.emit_output(agent_id, text, followed_by_tool=followed_by_tool)
         return events if events else []
     except Exception as e:
         return [{"error": str(e)}]
 
-def simulate_tool_call(tool_name: str, tool_args: dict) -> list[dict]:
+def simulate_tool_call(tool_name: str, tool_args: dict,
+                       agent_id: str = AGENT_ID) -> list[dict]:
     """
     Simulate a tool call observation for ToolRetryDetector testing.
     Uses sentinel.observe_tool_call() if available, falls back to emit.
     """
     try:
         events = sentinel.observe_tool_call(
-            AGENT_ID,
+            agent_id,
             tool_name=tool_name,
             args_hash=args_hash(tool_args),
         )
@@ -94,9 +193,17 @@ def simulate_tool_call(tool_name: str, tool_args: dict) -> list[dict]:
         # If binding doesn't expose observe_tool_call directly,
         # encode as a structured emit
         payload = f"[TOOL_CALL] {tool_name}({json.dumps(tool_args)})"
-        return emit_and_check(payload, followed_by_tool=True)
+        return emit_and_check(payload, followed_by_tool=True, agent_id=agent_id)
     except Exception as e:
         return [{"error": str(e)}]
+
+def event_signal(evt: dict) -> Optional[str]:
+    """
+    Extract the fired signal name from an event, spanning the legacy harness-side
+    shape (`signal_type`) and the server-side WS degradation shape (`signal`).
+    Returns None for non-firing events (e.g. an error sentinel).
+    """
+    return evt.get("signal_type") or evt.get("signal")
 
 # ─── Suite runner ───────────────────────────────────────────────────────────────
 
@@ -107,6 +214,7 @@ def run_suite(suite: dict) -> SuiteResult:
     goal        = suite.get("goal")        # for GoalDriftDetector
     scope       = suite.get("scope")       # for ScopeDetector
     tool_seq    = suite.get("tool_seq")    # for ToolRetryDetector: list of (name, args)
+    ollama_opts = suite.get("ollama_options")  # optional per-suite override
 
     print(f"\n{'═'*60}")
     print(f"  SUITE: {detector}")
@@ -115,13 +223,21 @@ def run_suite(suite: dict) -> SuiteResult:
 
     result = SuiteResult(detector=detector, description=description, fired=False)
 
+    # Fresh WS agent per suite so accumulated score / detector windows / the
+    # post-termination lock from earlier suites can't bleed in. See
+    # suite_agent_id() for why a single shared id would break the report.
+    agent_id = suite_agent_id(detector)
+
+    # Drop any degradation events left over from the previous suite.
+    clear_event_queue()
+
     # Register agent with optional metadata
     try:
-        sentinel.register(AGENT_ID, TRUST_TIER)
+        sentinel.register(agent_id, TRUST_TIER)
         if goal:
-            sentinel.set_agent_goal(AGENT_ID, goal)
+            sentinel.set_agent_goal(agent_id, goal)
         if scope:
-            sentinel.set_agent_scope(AGENT_ID, scope)
+            sentinel.set_agent_scope(agent_id, scope)
     except Exception as e:
         print(f"  [WARN] sentinel.register: {e}")
 
@@ -137,7 +253,7 @@ def run_suite(suite: dict) -> SuiteResult:
         print(f"\n  Turn {i}/{len(turns_cfg)}")
         print(f"  Prompt: {prompt[:80]}{'...' if len(prompt)>80 else ''}")
 
-        response, elapsed = call_ollama(prompt, history)
+        response, elapsed = call_ollama(prompt, history, options=ollama_opts)
         history.append({"role": "user", "content": prompt})
         history.append({"role": "assistant", "content": response})
 
@@ -148,19 +264,27 @@ def run_suite(suite: dict) -> SuiteResult:
         if tool_seq and i <= len(tool_seq):
             # ToolRetryDetector: simulate the tool call
             tname, targs = tool_seq[i - 1]
-            events = simulate_tool_call(tname, targs)
+            events = simulate_tool_call(tname, targs, agent_id=agent_id)
             print(f"  [TOOL] {tname}({targs}) → {len(events)} event(s)")
         else:
-            events = emit_and_check(response, followed_by_tool=inject_tool_call)
+            events = emit_and_check(response, followed_by_tool=inject_tool_call,
+                                    agent_id=agent_id)
+
+        # emit_output()/observe_tool_call() are fire-and-forget — detection runs
+        # server-side and is broadcast over the WS plane. Collect those events.
+        ws_events = drain_events(agent_id, timeout=DRAIN_TIMEOUT)
+        events = events + ws_events
 
         for evt in events:
-            if "signal_type" in evt:
-                print(f"  *** SENTINEL FIRED: {evt['signal_type']} score={evt.get('score',0):.3f} ***")
+            signal = event_signal(evt)
+            if signal:
+                score = evt.get("score", 0.0)
+                print(f"  *** SENTINEL FIRED: {signal} score={score:.3f} ***")
                 all_events.append(evt)
                 if not result.fired:
                     result.fired = True
                     result.first_fire_turn = i
-                    result.final_score = evt.get("score", 0.0)
+                    result.final_score = score
 
         turn_result = TurnResult(
             turn=i,
@@ -174,7 +298,7 @@ def run_suite(suite: dict) -> SuiteResult:
 
         # Heartbeat between turns
         try:
-            sentinel.heartbeat(AGENT_ID)
+            sentinel.heartbeat(agent_id)
         except Exception:
             pass
 
@@ -272,6 +396,10 @@ def main():
         if not suites:
             print(f"Unknown suite: {args_ns.suite}")
             return
+
+    # Background listener for server-side degradation broadcasts. Must be up
+    # before any suite emits so no early fire is missed.
+    start_ws_listener()
 
     results = []
     for suite in suites:
