@@ -40,6 +40,16 @@ const DEFAULT_WS_URL: &str = "ws://127.0.0.1:7777";
 static AGENT_TIERS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// In-process `agent_id` → assigned-goal / authorized-scope registries. The WS
+/// plane needs these to seed the GoalDrift and Scope detectors, but its agent
+/// is created lazily by `emit_output`'s self-heal register. Recording the goal
+/// and scope here (via `set_agent_goal` / `set_agent_scope`, typically called
+/// before the first emit) lets that self-heal register carry them through.
+static AGENT_GOALS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static AGENT_SCOPES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn get_socket_path() -> String {
     std::env::var("SENTINEL_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.into())
 }
@@ -144,6 +154,110 @@ fn register(agent_id: &str, tier: &str) -> PyResult<RegisterResponse> {
     Ok(parsed)
 }
 
+/// Record the agent's assigned goal. Used by the WS plane's GoalDrift detector
+/// to measure sustained drift from the task. Stored in-process and carried to
+/// the WS plane by `emit_output`'s self-heal register, so call this before the
+/// first `emit_output` for the agent.
+#[pyfunction]
+fn set_agent_goal(agent_id: &str, goal: &str) -> PyResult<()> {
+    AGENT_GOALS
+        .lock()
+        .unwrap()
+        .insert(agent_id.to_string(), goal.to_string());
+    Ok(())
+}
+
+/// Record the agent's authorized scope (the task definition). Baseline for the
+/// WS plane's Scope detector. Same lifecycle as `set_agent_goal`.
+#[pyfunction]
+fn set_agent_scope(agent_id: &str, scope: &str) -> PyResult<()> {
+    AGENT_SCOPES
+        .lock()
+        .unwrap()
+        .insert(agent_id.to_string(), scope.to_string());
+    Ok(())
+}
+
+/// Submit an observed tool call to the WS plane's ToolRetryDetector. Like
+/// `emit_output`, this targets the WebSocket transport and self-heals the WS
+/// registration on first contact. Fire-and-forget — returns None on success.
+#[pyfunction]
+fn observe_tool_call(agent_id: &str, tool_name: &str, args_hash: &str) -> PyResult<Option<()>> {
+    use tungstenite::Message;
+
+    let url = get_ws_url();
+    let (mut ws, _resp) = tungstenite::connect(url.as_str())
+        .map_err(|e| PyRuntimeError::new_err(format!("websocket connect failed: {e}")))?;
+    if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = ws.get_ref() {
+        let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    }
+
+    let call_msg = serde_json::json!({
+        "type": "observe_tool_call",
+        "agent_id": agent_id,
+        "tool_name": tool_name,
+        "args_hash": args_hash,
+    })
+    .to_string();
+
+    ws.send(Message::Text(call_msg.clone()))
+        .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+
+    let mut needs_register = false;
+    for _ in 0..8 {
+        match ws.read() {
+            Ok(Message::Text(t)) => {
+                if t.contains("not registered") && t.contains(agent_id) {
+                    needs_register = true;
+                    break;
+                }
+                if t.contains(agent_id) {
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
+        }
+    }
+
+    if needs_register {
+        let tier = AGENT_TIERS
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_else(|| "supervised".to_string());
+        let goal = AGENT_GOALS.lock().unwrap().get(agent_id).cloned();
+        let scope = AGENT_SCOPES.lock().unwrap().get(agent_id).cloned();
+        let register_msg = serde_json::json!({
+            "type": "register",
+            "agent_id": agent_id,
+            "tier": tier,
+            "goal": goal,
+            "scope": scope,
+        })
+        .to_string();
+        ws.send(Message::Text(register_msg))
+            .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+        ws.send(Message::Text(call_msg))
+            .map_err(|e| PyRuntimeError::new_err(format!("websocket send failed: {e}")))?;
+        for _ in 0..8 {
+            match ws.read() {
+                Ok(Message::Text(t))
+                    if t.contains(agent_id) && !t.contains("not registered") =>
+                {
+                    break
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => continue,
+            }
+        }
+    }
+
+    let _ = ws.close(None);
+    Ok(None)
+}
+
 /// Send a heartbeat for a registered agent.
 #[pyfunction]
 fn heartbeat(agent_id: &str) -> PyResult<HeartbeatResponse> {
@@ -233,10 +347,16 @@ fn emit_output(
             .get(agent_id)
             .cloned()
             .unwrap_or_else(|| "supervised".to_string());
+        // Seed the GoalDrift / Scope detectors from the in-process registries
+        // if the operator set them (no-ops when absent).
+        let goal = AGENT_GOALS.lock().unwrap().get(agent_id).cloned();
+        let scope = AGENT_SCOPES.lock().unwrap().get(agent_id).cloned();
         let register_msg = serde_json::json!({
             "type": "register",
             "agent_id": agent_id,
             "tier": tier,
+            "goal": goal,
+            "scope": scope,
         })
         .to_string();
         // On a single connection these frames are processed in order: register
@@ -524,6 +644,9 @@ fn _sentinel_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register, m)?)?;
     m.add_function(wrap_pyfunction!(heartbeat, m)?)?;
     m.add_function(wrap_pyfunction!(emit_output, m)?)?;
+    m.add_function(wrap_pyfunction!(observe_tool_call, m)?)?;
+    m.add_function(wrap_pyfunction!(set_agent_goal, m)?)?;
+    m.add_function(wrap_pyfunction!(set_agent_scope, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
 
     // Types — re-exported from sentinel-types, not redefined

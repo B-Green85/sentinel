@@ -20,11 +20,38 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
+use sentinel_signals::detectors::{
+    ConfidenceInflationDetector, GoalDriftDetector, OutputQualityDetector, ReasoningLoopDetector,
+    ScopeDetector, SelfReferentialDetector, ToolRetryDetector,
+};
+use sentinel_signals::detectors::CascadeDetector;
+use sentinel_types::{
+    AgentOutput, DegradationEvent as SigEvent, ObservedToolCall, SignalThresholds, SignalType,
+    WindowConfig,
+};
+
 use crate::audit::{AuditEntry, AuditTrail};
 use crate::config::Config;
 use crate::event_bus::EventBus;
 use crate::logger::Logger;
 use crate::types::{now_timestamp, Event};
+
+/// Stable wire name for each signal type — the string carried in the
+/// `Degradation` broadcast's `signal` field and the rolling signal history.
+fn signal_name(s: SignalType) -> &'static str {
+    match s {
+        SignalType::RepetitionScore => "repetition",
+        SignalType::SelfReferentialLoop => "self_referential",
+        SignalType::TokenVelocityStall => "token_velocity",
+        SignalType::ToolRetryAnomaly => "tool_retry",
+        SignalType::ReasoningLoop => "reasoning_loop",
+        SignalType::GoalDrift => "goal_drift",
+        SignalType::ConfidenceInflation => "confidence_inflation",
+        SignalType::ScopeViolation => "scope",
+        SignalType::HedgeAccumulation => "output_quality",
+        SignalType::Cascade => "cascade",
+    }
+}
 
 /// Outputs retained per agent for repetition detection.
 const REPETITION_WINDOW: usize = 10;
@@ -68,15 +95,33 @@ impl std::fmt::Display for WsTier {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsInbound {
-    /// Register an agent for oversight.
+    /// Register an agent for oversight. Optional `goal`/`scope` seed the
+    /// GoalDrift and Scope detectors at registration.
     Register {
         agent_id: String,
         tier: Option<WsTier>,
+        #[serde(default)]
+        goal: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// Liveness signal — emitted by infrastructure, never the agent itself.
     Heartbeat { agent_id: String },
     /// Submit an agent output for passive signal detection.
-    EmitOutput { agent_id: String, output: String },
+    EmitOutput {
+        agent_id: String,
+        output: String,
+        /// Whether this output was immediately followed by a tool call.
+        /// Consumed by the self-referential and reasoning-loop detectors.
+        #[serde(default)]
+        followed_by_tool_call: bool,
+    },
+    /// Submit an observed tool call for the tool-retry detector.
+    ObserveToolCall {
+        agent_id: String,
+        tool_name: String,
+        args_hash: String,
+    },
     /// Query status. With `agent_id` → one agent; without → full snapshot.
     Status { agent_id: Option<String> },
     /// Operator override. Hashed and audited before it is applied.
@@ -174,11 +219,25 @@ struct WsAgent {
     recent_outputs: VecDeque<HashSet<String>>,
     /// Arrival times of recent outputs — token-velocity detector window.
     emit_times: VecDeque<SystemTime>,
+    /// v3 content detectors from `sentinel-signals`. Repetition and the
+    /// timing-based velocity heuristic stay inline above (they don't depend on
+    /// task-state markers the WS plane never receives); these are the
+    /// phrase/window detectors the inline pair never covered.
+    self_referential: SelfReferentialDetector,
+    reasoning_loop: ReasoningLoopDetector,
+    goal_drift: GoalDriftDetector,
+    confidence: ConfidenceInflationDetector,
+    scope: ScopeDetector,
+    output_quality: OutputQualityDetector,
+    tool_retry: ToolRetryDetector,
+    cascade: CascadeDetector,
 }
 
 impl WsAgent {
     fn new(agent_id: String, tier: WsTier) -> Self {
         let now = SystemTime::now();
+        let wc = WindowConfig::default();
+        let st = SignalThresholds::default();
         Self {
             agent_id,
             tier,
@@ -188,6 +247,14 @@ impl WsAgent {
             terminated: false,
             recent_outputs: VecDeque::new(),
             emit_times: VecDeque::new(),
+            self_referential: SelfReferentialDetector::new(&wc, &st),
+            reasoning_loop: ReasoningLoopDetector::new(&wc, &st),
+            goal_drift: GoalDriftDetector::new(&wc, &st),
+            confidence: ConfidenceInflationDetector::new(&wc, &st),
+            scope: ScopeDetector::new(&wc, &st),
+            output_quality: OutputQualityDetector::new(&wc, &st),
+            tool_retry: ToolRetryDetector::new(&wc, &st),
+            cascade: CascadeDetector::new(&st),
         }
     }
 
@@ -224,32 +291,113 @@ impl WsAgent {
     /// instrumentation inside the agent, no inference.
     fn observe(
         &mut self,
-        output: &str,
+        output: &AgentOutput,
         now: SystemTime,
         repetition_threshold: f64,
     ) -> Vec<(String, f64)> {
-        let words = word_set(output);
-        let mut fired = Vec::new();
+        let words = word_set(&output.content);
+        // (SignalType, score) so the cascade aggregator can key on type before
+        // we flatten to wire names.
+        let mut typed: Vec<(SignalType, f64)> = Vec::new();
 
-        // Repetition — compare against the existing window before inserting.
+        // Repetition — inline word-set Jaccard. Compare before inserting.
         if let Some(score) = self.detect_repetition(&words, repetition_threshold) {
-            fired.push(("repetition".to_string(), score));
+            typed.push((SignalType::RepetitionScore, score));
         }
         self.recent_outputs.push_back(words);
         while self.recent_outputs.len() > REPETITION_WINDOW {
             self.recent_outputs.pop_front();
         }
 
-        // Token velocity — inter-arrival timing of outputs.
+        // Token velocity — inline inter-arrival timing of outputs.
         self.emit_times.push_back(now);
         while self.emit_times.len() > VELOCITY_WINDOW {
             self.emit_times.pop_front();
         }
         if let Some(score) = self.detect_velocity() {
-            fired.push(("token_velocity".to_string(), score));
+            typed.push((SignalType::TokenVelocityStall, score));
         }
 
-        fired
+        // v3 content detectors (phrase/window based) from sentinel-signals.
+        if let Some(e) = self.self_referential.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+        if let Some(e) = self.reasoning_loop.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+        if let Some(e) = self.goal_drift.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+        if let Some(e) = self.confidence.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+        if let Some(e) = self.scope.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+        if let Some(e) = self.output_quality.ingest(output) {
+            typed.push((e.signal_type, e.score));
+        }
+
+        // Cascade — feed every signal fired this turn; it fires once ≥4
+        // distinct signal types have been observed for this agent.
+        let mut cascade_score = None;
+        for (st, sc) in &typed {
+            let evt = SigEvent {
+                agent_id: output.agent_id.clone(),
+                signal_type: *st,
+                score: *sc,
+                timestamp: output.timestamp.clone(),
+            };
+            if let Some(c) = self.cascade.observe(&evt) {
+                cascade_score = Some(c.score);
+            }
+        }
+        if let Some(cs) = cascade_score {
+            typed.push((SignalType::Cascade, cs));
+        }
+
+        typed
+            .into_iter()
+            .map(|(st, sc)| (signal_name(st).to_string(), sc))
+            .collect()
+    }
+
+    /// Run the tool-retry detector over an observed tool call, feeding the
+    /// result into the cascade aggregator. Returns `(signal, score)` pairs.
+    fn observe_tool(&mut self, call: &ObservedToolCall) -> Vec<(String, f64)> {
+        let mut typed: Vec<(SignalType, f64)> = Vec::new();
+        if let Some(e) = self.tool_retry.ingest(call) {
+            typed.push((e.signal_type, e.score));
+        }
+        let mut cascade_score = None;
+        for (st, sc) in &typed {
+            let evt = SigEvent {
+                agent_id: call.agent_id.clone(),
+                signal_type: *st,
+                score: *sc,
+                timestamp: call.timestamp.clone(),
+            };
+            if let Some(c) = self.cascade.observe(&evt) {
+                cascade_score = Some(c.score);
+            }
+        }
+        if let Some(cs) = cascade_score {
+            typed.push((SignalType::Cascade, cs));
+        }
+        typed
+            .into_iter()
+            .map(|(st, sc)| (signal_name(st).to_string(), sc))
+            .collect()
+    }
+
+    /// Set the agent's assigned goal (enables GoalDrift sustained-drift scoring).
+    fn set_goal(&mut self, goal: &str) {
+        self.goal_drift.set_assigned_goal(goal);
+    }
+
+    /// Set the agent's authorized scope (baseline for the Scope detector).
+    fn set_scope(&mut self, task: &str) {
+        self.scope.set_authorized_scope(task);
     }
 
     fn detect_repetition(&self, words: &HashSet<String>, threshold: f64) -> Option<f64> {
@@ -443,14 +591,29 @@ impl WsServer {
         };
 
         match inbound {
-            WsInbound::Register { agent_id, tier } => {
-                self.handle_register(agent_id, tier.unwrap_or(WsTier::Autonomous))
+            WsInbound::Register {
+                agent_id,
+                tier,
+                goal,
+                scope,
+            } => {
+                self.handle_register(agent_id, tier.unwrap_or(WsTier::Autonomous), goal, scope)
                     .await
             }
             WsInbound::Heartbeat { agent_id } => self.handle_heartbeat(agent_id).await,
-            WsInbound::EmitOutput { agent_id, output } => {
-                self.handle_emit_output(agent_id, output).await
+            WsInbound::EmitOutput {
+                agent_id,
+                output,
+                followed_by_tool_call,
+            } => {
+                self.handle_emit_output(agent_id, output, followed_by_tool_call)
+                    .await
             }
+            WsInbound::ObserveToolCall {
+                agent_id,
+                tool_name,
+                args_hash,
+            } => self.handle_observe_tool_call(agent_id, tool_name, args_hash).await,
             WsInbound::Status { agent_id } => self.handle_status(agent_id).await,
             WsInbound::Override {
                 agent_id,
@@ -460,13 +623,26 @@ impl WsServer {
         }
     }
 
-    async fn handle_register(&self, agent_id: String, tier: WsTier) -> Vec<WsOutbound> {
+    async fn handle_register(
+        &self,
+        agent_id: String,
+        tier: WsTier,
+        goal: Option<String>,
+        scope: Option<String>,
+    ) -> Vec<WsOutbound> {
         // Audit the registration before the agent enters the registry.
         let hash = self.audit.record("operator", "register", &agent_id).await;
 
         {
             let mut agents = self.agents.lock().await;
-            agents.insert(agent_id.clone(), WsAgent::new(agent_id.clone(), tier));
+            let mut agent = WsAgent::new(agent_id.clone(), tier);
+            if let Some(g) = goal.as_deref() {
+                agent.set_goal(g);
+            }
+            if let Some(s) = scope.as_deref() {
+                agent.set_scope(s);
+            }
+            agents.insert(agent_id.clone(), agent);
         }
 
         self.event_bus.publish(Event::AgentRegistered {
@@ -508,18 +684,17 @@ impl WsServer {
         }
     }
 
-    async fn handle_emit_output(&self, agent_id: String, output: String) -> Vec<WsOutbound> {
+    async fn handle_emit_output(
+        &self,
+        agent_id: String,
+        output: String,
+        followed_by_tool_call: bool,
+    ) -> Vec<WsOutbound> {
         // The observation itself is an audited event.
         let _ = self.audit.record("agent", "emit_output", &agent_id).await;
 
-        struct Pending {
-            signal: String,
-            score: f64,
-            action: String,
-        }
-
         // Detection runs synchronously under the registry lock.
-        let (pendings, terminated_now, status_msg) = {
+        let (fired, terminated_now, status_msg) = {
             let mut agents = self.agents.lock().await;
             let agent = match agents.get_mut(&agent_id) {
                 Some(a) => a,
@@ -534,63 +709,127 @@ impl WsServer {
                 return vec![agent.status_out(String::new())];
             }
 
-            let fired = agent.observe(
-                &output,
+            let agent_output = AgentOutput {
+                agent_id: agent_id.clone(),
+                content: output,
+                timestamp: now_timestamp(),
+                followed_by_tool_call,
+            };
+            let signals = agent.observe(
+                &agent_output,
                 SystemTime::now(),
                 self.config.thresholds.repetition_score,
             );
-
-            let mut pendings = Vec::new();
-            let mut terminated_now = false;
-            for (signal, score) in fired {
-                agent.cumulative_score += score;
-                let cumulative = agent.cumulative_score;
-                let action = self.action_for(cumulative);
-                agent.state = self.state_for(cumulative).to_string();
-                if action == "terminated" && !agent.terminated {
-                    agent.terminated = true;
-                    terminated_now = true;
-                }
-                pendings.push(Pending {
-                    signal,
-                    score,
-                    action,
-                });
-            }
-            (pendings, terminated_now, agent.status_out(String::new()))
+            let (fired, terminated_now) = self.accumulate(agent, signals);
+            (fired, terminated_now, agent.status_out(String::new()))
         };
 
-        // Audit + broadcast happen after the lock is released. Each action is
-        // recorded on the audit trail before it is broadcast.
-        for p in &pendings {
-            let audit_hash = if p.action == "no_action" {
+        self.broadcast_signals(&agent_id, fired, terminated_now).await;
+        vec![status_msg]
+    }
+
+    async fn handle_observe_tool_call(
+        &self,
+        agent_id: String,
+        tool_name: String,
+        args_hash: String,
+    ) -> Vec<WsOutbound> {
+        let _ = self
+            .audit
+            .record("agent", "observe_tool_call", &agent_id)
+            .await;
+
+        let (fired, terminated_now, status_msg) = {
+            let mut agents = self.agents.lock().await;
+            let agent = match agents.get_mut(&agent_id) {
+                Some(a) => a,
+                None => {
+                    return vec![WsOutbound::Error {
+                        message: format!("agent not registered: {agent_id}"),
+                    }]
+                }
+            };
+            if agent.terminated {
+                return vec![agent.status_out(String::new())];
+            }
+
+            let call = ObservedToolCall {
+                agent_id: agent_id.clone(),
+                tool_name,
+                args_hash,
+                timestamp: now_timestamp(),
+            };
+            let signals = agent.observe_tool(&call);
+            let (fired, terminated_now) = self.accumulate(agent, signals);
+            (fired, terminated_now, agent.status_out(String::new()))
+        };
+
+        self.broadcast_signals(&agent_id, fired, terminated_now).await;
+        vec![status_msg]
+    }
+
+    /// Fold each fired `(signal, score)` into the agent's cumulative score,
+    /// updating its state and termination flag. Returns the `(signal, score,
+    /// action)` triples to broadcast and whether this batch crossed the hard
+    /// threshold for the first time.
+    fn accumulate(
+        &self,
+        agent: &mut WsAgent,
+        signals: Vec<(String, f64)>,
+    ) -> (Vec<(String, f64, String)>, bool) {
+        let mut fired = Vec::new();
+        let mut terminated_now = false;
+        for (signal, score) in signals {
+            agent.cumulative_score += score;
+            let cumulative = agent.cumulative_score;
+            let action = self.action_for(cumulative);
+            agent.state = self.state_for(cumulative).to_string();
+            if action == "terminated" && !agent.terminated {
+                agent.terminated = true;
+                terminated_now = true;
+            }
+            fired.push((signal, score, action));
+        }
+        (fired, terminated_now)
+    }
+
+    /// Audit + broadcast each fired signal (and a terminated event if the hard
+    /// threshold was crossed). Runs after the registry lock is released.
+    async fn broadcast_signals(
+        &self,
+        agent_id: &str,
+        fired: Vec<(String, f64, String)>,
+        terminated_now: bool,
+    ) {
+        for (signal, score, action) in &fired {
+            let audit_hash = if action == "no_action" {
                 String::new()
             } else {
-                self.audit.record("sentinel", &p.action, &agent_id).await
+                self.audit.record("sentinel", action, agent_id).await
             };
             let timestamp = now_timestamp();
 
             self.push_signal(SignalRecord {
                 timestamp: timestamp.clone(),
-                agent_id: agent_id.clone(),
-                signal: p.signal.clone(),
-                score: p.score,
-                action: p.action.clone(),
+                agent_id: agent_id.to_string(),
+                signal: signal.clone(),
+                score: *score,
+                action: action.clone(),
             })
             .await;
 
             self.event_bus.publish(Event::SignalDetected {
                 detector_id: "websocket".to_string(),
-                signal: p.signal.clone(),
-                severity: p.action.clone(),
+                signal: signal.clone(),
+                severity: action.clone(),
                 timestamp: timestamp.clone(),
             });
 
             self.emit(WsOutbound::Degradation {
-                agent_id: agent_id.clone(),
-                signal: p.signal.clone(),
-                score: p.score,
-                action: p.action.clone(),
+                agent_id: agent_id.to_string(),
+                signal: signal.clone(),
+                score: *score,
+                action: action.clone(),
                 timestamp,
                 audit_hash,
             });
@@ -599,22 +838,20 @@ impl WsServer {
         if terminated_now {
             let hash = self
                 .audit
-                .record("sentinel", "hard_terminate", &agent_id)
+                .record("sentinel", "hard_terminate", agent_id)
                 .await;
             self.logger.warn(
                 "websocket",
                 "hard threshold crossed — agent terminated",
-                Some(&agent_id),
+                Some(agent_id),
             );
             self.emit(WsOutbound::Terminated {
-                agent_id: agent_id.clone(),
+                agent_id: agent_id.to_string(),
                 reason: "hard_threshold_crossed".to_string(),
                 timestamp: now_timestamp(),
                 audit_hash: hash,
             });
         }
-
-        vec![status_msg]
     }
 
     async fn handle_status(&self, agent_id: Option<String>) -> Vec<WsOutbound> {
