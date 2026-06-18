@@ -58,7 +58,7 @@ function buildMarkdown(session, kind) {
   }
   lines.push('');
 
-  lines.push('## Culprit responses');
+  lines.push('## Trigger outputs');
   lines.push('');
   let any = false;
   for (const suite of session.suites || []) {
@@ -76,7 +76,7 @@ function buildMarkdown(session, kind) {
     lines.push('');
     lines.push('> ' + String(turn.prompt || '').replace(/\n/g, '\n> '));
     lines.push('');
-    lines.push('**Culprit response:**');
+    lines.push('**Trigger output:**');
     lines.push('');
     lines.push('```');
     lines.push(String(turn.response || '').trim());

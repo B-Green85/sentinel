@@ -1,7 +1,7 @@
 /**
  * detail.js — per-suite detail view. Renders every turn with its prompt and
- * response, and makes the culprit turn unmistakable: the exact model output
- * that tripped the detector is shown as the CULPRIT RESPONSE block. Model text
+ * response, and makes the triggering turn unmistakable: the exact agent output
+ * that tripped the detector is shown as the TRIGGER OUTPUT block. Model text
  * is escaped so stray braces can't be read as blessed tags.
  */
 'use strict';
@@ -61,7 +61,7 @@ function suiteDetailBody(suite, kind, term) {
     if (fired) {
       for (const ev of turn.sentinel_events) out.push(eventBlock(ev));
       out.push('');
-      out.push('{red-fg}{bold}CULPRIT RESPONSE:{/bold}{/red-fg}');
+      out.push('{red-fg}{bold}TRIGGER OUTPUT:{/bold}{/red-fg}');
       out.push(`{yellow-fg}${highlight(esc(turn.response), term)}{/yellow-fg}`);
     } else {
       out.push(`{cyan-fg}Response:{/cyan-fg} ${highlight(esc(turn.response), term)}`);
@@ -75,7 +75,7 @@ function suiteDetailBody(suite, kind, term) {
   }
 
   if (!culprit) {
-    blocks.unshift('{yellow-fg}This suite did not fire — no culprit turn.{/yellow-fg}\n');
+    blocks.unshift('{yellow-fg}This suite did not fire — no trigger output.{/yellow-fg}\n');
   }
   return blocks.join('\n\n');
 }

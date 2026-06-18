@@ -6,7 +6,7 @@ require sentinel-core to be running and makes no changes to anything.
 
 Runs alongside `sentinel-ui` (the live ratatui monitor): that window shows
 agents in flight, this one shows session history and *why* each signal fired —
-drilling down to the exact model output (the **culprit response**) that tripped
+drilling down to the exact agent output (the **trigger output**) that tripped
 each detector.
 
 ## Install & run
@@ -49,13 +49,13 @@ detection; a non-fire on a neutral run is a **CLEAN** true negative.
 | `E` | Export menu |
 | `Q` | Quit |
 
-**Detail (per suite)** — every turn, with the culprit response highlighted:
+**Detail (per suite)** — every turn, with the trigger output highlighted:
 
 | Key | Action |
 |---|---|
 | `Esc/B` | Back |
 | `↑/K` `↓/J` `PgUp/PgDn` | Scroll |
-| `A` | Copy the culprit's audit hash to the clipboard |
+| `A` | Copy the trigger output's audit hash to the clipboard |
 | `E` | Export current session |
 | `Q` | Quit |
 
@@ -64,7 +64,7 @@ detection; a non-fire on a neutral run is a **CLEAN** true negative.
 `E` opens an export menu:
 
 1. **Markdown** → `devlogs/sentinel-devlog-YYYY-MM-DD-HH-MM.md` — session
-   summary, every suite's status/score/action, and the culprit response for
+   summary, every suite's status/score/action, and the trigger output for
    each fired suite. Human-readable and committable.
 2. **PDF** → same name, `.pdf`. Requires the optional `md-to-pdf` dependency.
 3. **Print** → sends the Markdown to the default printer via `lpr`.

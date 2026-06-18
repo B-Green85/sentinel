@@ -4,7 +4,7 @@
  *
  * Read-only consumer of sentinel_*_results.json. Two screens:
  *   main   — one session's 12 suites, navigate sessions with ←/→
- *   detail — every turn of a suite, with the CULPRIT RESPONSE highlighted
+ *   detail — every turn of a suite, with the TRIGGER OUTPUT highlighted
  *
  * Layout follows the blessed pager pattern: a header box, a scrolling body,
  * and a footer of key hints. All rendering is delegated to the pure helpers in
@@ -38,7 +38,7 @@ if (args.help) {
   process.stdout.write(
     'sentinel-devlog [--dir <path>]\n\n' +
       'Reads sentinel_*_results.json from <path> (default ~/Projects/sentinel)\n' +
-      'and displays session history with culprit-response drill-down.\n'
+      'and displays session history with trigger-output drill-down.\n'
   );
   process.exit(0);
 }
