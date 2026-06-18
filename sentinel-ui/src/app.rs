@@ -47,6 +47,10 @@ pub enum ServerMsg {
         signal: String,
         score: f64,
         action: String,
+        #[serde(default)]
+        would_have_acted: String,
+        #[serde(default)]
+        observer_mode: bool,
         timestamp: String,
         #[serde(default)]
         audit_hash: String,
@@ -91,6 +95,9 @@ pub struct SignalRec {
     pub signal: String,
     pub score: f64,
     pub action: String,
+    /// In observer mode, the enforcement action that would have been taken.
+    #[serde(default)]
+    pub would_have_acted: String,
 }
 
 /// Audit entry as carried in a snapshot. Extra fields (sequence, actor,
@@ -272,9 +279,20 @@ impl App {
                 signal,
                 score,
                 action,
+                would_have_acted,
+                observer_mode,
                 timestamp,
                 audit_hash,
             } => {
+                // In observer mode, surface the suppressed enforcement so the
+                // operator sees what *would* have happened without it.
+                if observer_mode && !would_have_acted.is_empty() && would_have_acted != "no_action"
+                {
+                    self.status_line = format!(
+                        "observe — {agent_id}: {signal} would have triggered {}",
+                        would_have_acted.to_uppercase()
+                    );
+                }
                 self.push_audit(&action.to_uppercase(), &agent_id, &audit_hash, &timestamp);
                 self.push_signal(SignalRec {
                     timestamp,
@@ -282,6 +300,7 @@ impl App {
                     signal,
                     score,
                     action,
+                    would_have_acted,
                 });
             }
             ServerMsg::Terminated {
@@ -586,6 +605,7 @@ mod tests {
                 signal: "repetition".into(),
                 score: 0.4,
                 action: "soft_pause".into(),
+                would_have_acted: String::new(),
             });
             app.push_audit("SOFT_PAUSE", "a", "abcdef123456", "2026-05-16T10:44:08Z");
         }
@@ -617,6 +637,7 @@ mod tests {
                 signal: "repetition".into(),
                 score: 0.4,
                 action: "soft_pause".into(),
+                would_have_acted: String::new(),
             });
         }
         assert_eq!(app.signals.len(), 200, "every session signal is retained");

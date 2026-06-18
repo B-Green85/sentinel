@@ -45,6 +45,11 @@ fn parse_arg(args: &[String], flag: &str, default: &str) -> String {
     default.to_string()
 }
 
+/// True if any of `flags` is present as a bare (valueless) switch.
+fn has_flag(args: &[String], flags: &[&str]) -> bool {
+    args.iter().any(|a| flags.contains(&a.as_str()))
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -57,7 +62,29 @@ async fn main() -> std::io::Result<()> {
     // existing invocations behave identically.
     config.transport.path = std::path::PathBuf::from(&socket_path);
 
+    // `--oo` / `--observer-only` engages observer mode: signals are still
+    // detected, scored, audited and broadcast, but no enforcement action is
+    // ever taken. The flag overrides whatever the config file specified.
+    if has_flag(&args, &["--oo", "--observer-only"]) {
+        config.observer_mode = true;
+    }
+
     let daemon = Arc::new(SentinelDaemon::new(&log_path));
+
+    // Record the operating mode as the first audit entry so the trail itself
+    // proves whether enforcement was live for this run.
+    if config.observer_mode {
+        eprintln!("sentinel-core: starting in OBSERVER-ONLY mode — no enforcement actions will be taken");
+        daemon
+            .audit()
+            .record("sentinel", "sentinel_start", "observer_only")
+            .await;
+    } else {
+        daemon
+            .audit()
+            .record("sentinel", "sentinel_start", "enforcement")
+            .await;
+    }
 
     // Start heartbeat monitor (checks every second).
     daemon.start_heartbeat_monitor(1);

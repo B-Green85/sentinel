@@ -153,7 +153,7 @@ fn render_signals(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(format!("{:<18}", truncate(&s.agent_id, 18))),
                 Span::raw(format!("{:<16}", truncate(&s.signal, 16))),
                 Span::raw(format!("{:>5.2}  ", s.score)),
-                Span::styled(action_label(&s.action), Style::default().fg(color)),
+                Span::styled(signal_action_label(s), Style::default().fg(color)),
             ])
         })
         .collect();
@@ -297,6 +297,7 @@ fn state_style(state: &str) -> (&'static str, Color) {
     match state {
         "clean" => ("✓ Clean", Color::Green),
         "watch" => ("⚠ Watch", Color::Yellow),
+        "observe" => ("◉ Observe", Color::Cyan),
         "degraded" => ("✗ Degraded", Color::Red),
         _ => ("? Unknown", Color::Gray),
     }
@@ -305,6 +306,7 @@ fn state_style(state: &str) -> (&'static str, Color) {
 fn action_style(action: &str) -> (&'static str, Color) {
     match action {
         "no_action" => ("no action", Color::DarkGray),
+        "signal_observed" => ("observe", Color::Cyan),
         "soft_pause" => ("soft", Color::Yellow),
         "write_suspended" => ("medium", Color::Rgb(255, 165, 0)),
         "terminated" => ("hard", Color::Red),
@@ -319,6 +321,24 @@ fn action_label(action: &str) -> String {
         "write_suspended" => "medium — write suspended".to_string(),
         "terminated" => "hard — terminated".to_string(),
         other => other.to_string(),
+    }
+}
+
+/// Label for a signal row, including the observer-mode "would have" annotation.
+/// In observer mode the action is `signal_observed`; surface the enforcement
+/// action that was suppressed (e.g. `observe — would terminate`).
+fn signal_action_label(s: &crate::app::SignalRec) -> String {
+    if s.action == "signal_observed" {
+        let would = match s.would_have_acted.as_str() {
+            "soft_pause" => "would soft-pause",
+            "write_suspended" => "would suspend writes",
+            "terminated" => "would terminate",
+            "" => "no action",
+            other => other,
+        };
+        format!("observe — {would}")
+    } else {
+        action_label(&s.action)
     }
 }
 

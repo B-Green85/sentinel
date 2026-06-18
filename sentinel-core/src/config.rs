@@ -15,6 +15,13 @@ pub struct Config {
     pub thresholds: Thresholds,
     pub controls: Controls,
     pub transport: TransportConfig,
+    /// Observer-only mode (`--oo` / `--observer-only`). When set, detectors
+    /// still run and every signal is scored, audited and broadcast — but NO
+    /// enforcement action is taken (no soft pause, write suspend or terminate).
+    /// Normally driven by the CLI flag; defaults off and may also be set in
+    /// `sentinel.toml` for a permanently observe-only deployment.
+    #[serde(default)]
+    pub observer_mode: bool,
 }
 
 impl Default for Config {
@@ -24,6 +31,7 @@ impl Default for Config {
             thresholds: Thresholds::default(),
             controls: Controls::default(),
             transport: TransportConfig::default(),
+            observer_mode: false,
         }
     }
 }

@@ -155,7 +155,19 @@ pub enum WsOutbound {
         agent_id: String,
         signal: String,
         score: f64,
+        /// The action actually taken. In enforcement mode this is the response
+        /// tier (`soft_pause` / `write_suspended` / `terminated`). In observer
+        /// mode it is `signal_observed` — the signal was recorded but nothing
+        /// was enforced.
         action: String,
+        /// In observer mode, the enforcement action that *would* have been
+        /// taken had enforcement been live. Empty in enforcement mode (where
+        /// `action` already carries it).
+        #[serde(default)]
+        would_have_acted: String,
+        /// Whether the daemon is running observer-only (`--oo`).
+        #[serde(default)]
+        observer_mode: bool,
         timestamp: String,
         audit_hash: String,
     },
@@ -202,6 +214,10 @@ pub struct SignalRecord {
     pub signal: String,
     pub score: f64,
     pub action: String,
+    /// In observer mode, the enforcement action that would have been taken.
+    /// Empty in enforcement mode. Defaulted for backward-compatible decoding.
+    #[serde(default)]
+    pub would_have_acted: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -770,25 +786,45 @@ impl WsServer {
 
     /// Fold each fired `(signal, score)` into the agent's cumulative score,
     /// updating its state and termination flag. Returns the `(signal, score,
-    /// action)` triples to broadcast and whether this batch crossed the hard
-    /// threshold for the first time.
+    /// action, would_have_acted)` tuples to broadcast and whether this batch
+    /// crossed the hard threshold for the first time.
+    ///
+    /// In observer mode (`--oo`) the score still accumulates and the would-be
+    /// action is still computed, but NO enforcement is applied: the agent is
+    /// never terminated, its state never reads `degraded`, and the action taken
+    /// is recorded as `signal_observed`.
     fn accumulate(
         &self,
         agent: &mut WsAgent,
         signals: Vec<(String, f64)>,
-    ) -> (Vec<(String, f64, String)>, bool) {
+    ) -> (Vec<(String, f64, String, String)>, bool) {
+        let observer = self.config.observer_mode;
         let mut fired = Vec::new();
         let mut terminated_now = false;
         for (signal, score) in signals {
             agent.cumulative_score += score;
             let cumulative = agent.cumulative_score;
-            let action = self.action_for(cumulative);
-            agent.state = self.state_for(cumulative).to_string();
-            if action == "terminated" && !agent.terminated {
-                agent.terminated = true;
-                terminated_now = true;
-            }
-            fired.push((signal, score, action));
+            // The response tier the score warrants — the would-be action.
+            let would = self.action_for(cumulative);
+
+            let action = if observer {
+                // Observe-only: record the observation, take no enforcement.
+                agent.state = self.observe_state_for(cumulative).to_string();
+                if would == "no_action" {
+                    "no_action".to_string()
+                } else {
+                    "signal_observed".to_string()
+                }
+            } else {
+                agent.state = self.state_for(cumulative).to_string();
+                if would == "terminated" && !agent.terminated {
+                    agent.terminated = true;
+                    terminated_now = true;
+                }
+                would.clone()
+            };
+
+            fired.push((signal, score, action, would));
         }
         (fired, terminated_now)
     }
@@ -798,10 +834,13 @@ impl WsServer {
     async fn broadcast_signals(
         &self,
         agent_id: &str,
-        fired: Vec<(String, f64, String)>,
+        fired: Vec<(String, f64, String, String)>,
         terminated_now: bool,
     ) {
-        for (signal, score, action) in &fired {
+        let observer = self.config.observer_mode;
+        for (signal, score, action, would) in &fired {
+            // `signal_observed` IS an audited event in observer mode; only a
+            // genuine `no_action` (score below the soft threshold) is silent.
             let audit_hash = if action == "no_action" {
                 String::new()
             } else {
@@ -815,6 +854,7 @@ impl WsServer {
                 signal: signal.clone(),
                 score: *score,
                 action: action.clone(),
+                would_have_acted: if observer { would.clone() } else { String::new() },
             })
             .await;
 
@@ -830,6 +870,8 @@ impl WsServer {
                 signal: signal.clone(),
                 score: *score,
                 action: action.clone(),
+                would_have_acted: if observer { would.clone() } else { String::new() },
+                observer_mode: observer,
                 timestamp,
                 audit_hash,
             });
@@ -979,6 +1021,18 @@ impl WsServer {
         }
     }
 
+    /// Observer-mode agent state. The agent is never `degraded` — once a
+    /// signal crosses the soft threshold the agent reads `observe`, marking
+    /// that enforcement *would* have engaged here had it been live.
+    fn observe_state_for(&self, score: f64) -> &'static str {
+        let c = &self.config.controls;
+        if score >= c.soft_threshold {
+            "observe"
+        } else {
+            "clean"
+        }
+    }
+
     /// Fan an outbound event out to every connected client.
     fn emit(&self, msg: WsOutbound) {
         let _ = self.broadcast.send(msg);
@@ -990,6 +1044,11 @@ mod tests {
     use super::*;
 
     fn test_server() -> Arc<WsServer> {
+        server_with_config(Config::default())
+    }
+
+    /// A server whose config has been mutated for the test (e.g. observer mode).
+    fn server_with_config(config: Config) -> Arc<WsServer> {
         let dir = std::env::temp_dir().join("sentinel-ws-test");
         let _ = std::fs::create_dir_all(&dir);
         let logger = Logger::start(dir.join("ws.log").to_str().unwrap());
@@ -997,7 +1056,7 @@ mod tests {
             AuditTrail::new().into_shared(),
             EventBus::new(64).into_shared(),
             logger,
-            Config::default(),
+            config,
         )
     }
 
@@ -1100,6 +1159,93 @@ mod tests {
         assert!(
             history.iter().any(|s| s.signal == "repetition"),
             "expected a repetition signal in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_mode_scores_but_never_enforces() {
+        let mut config = Config::default();
+        config.observer_mode = true;
+        let server = server_with_config(config);
+        server
+            .handle_message(r#"{"type":"register","agent_id":"obs","tier":"supervised"}"#)
+            .await;
+
+        // Repeated identical output drives the cumulative score past the hard
+        // threshold — enough to terminate in enforcement mode.
+        let repeated =
+            r#"{"type":"emit_output","agent_id":"obs","output":"raise to twenty five every single hand"}"#;
+        server.handle_message(repeated).await;
+        for _ in 0..6 {
+            server.handle_message(repeated).await;
+        }
+
+        // The signal still fired and was recorded.
+        {
+            let history = server.signals.lock().await;
+            assert!(
+                history.iter().any(|s| s.signal == "repetition"),
+                "repetition signal should still be detected in observer mode"
+            );
+            // Every recorded action is an observation, never an enforcement tier.
+            assert!(
+                history.iter().all(|s| s.action == "signal_observed"
+                    || s.action == "no_action"),
+                "observer mode must never record an enforcement action"
+            );
+            // The would-be action is preserved for transparency.
+            assert!(
+                history.iter().any(|s| s.would_have_acted == "terminated"),
+                "observer mode should record the would-be HARD_TERMINATE"
+            );
+        }
+
+        // The agent is NOT terminated and NOT degraded — it stays active.
+        {
+            let agents = server.agents.lock().await;
+            let agent = agents.get("obs").unwrap();
+            assert!(!agent.terminated, "observer mode must not terminate the agent");
+            assert_ne!(agent.state, "degraded", "observer mode must not degrade state");
+            assert!(agent.cumulative_score > 0.0, "score must still accumulate");
+        }
+
+        // The audit trail recorded observations but never an enforcement action.
+        let actions: Vec<String> = server
+            .audit
+            .entries()
+            .await
+            .iter()
+            .map(|e| e.action.clone())
+            .collect();
+        assert!(
+            actions.iter().any(|a| a == "signal_observed"),
+            "audit must contain SIGNAL_OBSERVED entries"
+        );
+        assert!(
+            !actions.iter().any(|a| a == "terminated" || a == "hard_terminate"),
+            "audit must not contain any enforcement action in observer mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforcement_mode_still_terminates() {
+        // Guard against the observer gate leaking into enforcement mode.
+        let server = test_server(); // observer_mode = false
+        server
+            .handle_message(r#"{"type":"register","agent_id":"enf","tier":"supervised"}"#)
+            .await;
+
+        let repeated =
+            r#"{"type":"emit_output","agent_id":"enf","output":"raise to twenty five every single hand"}"#;
+        server.handle_message(repeated).await;
+        for _ in 0..6 {
+            server.handle_message(repeated).await;
+        }
+
+        let agents = server.agents.lock().await;
+        assert!(
+            agents.get("enf").unwrap().terminated,
+            "enforcement mode must still terminate past the hard threshold"
         );
     }
 
