@@ -1,0 +1,16 @@
+{
+  "name": "sentinel-devlog",
+  "version": "0.1.0",
+  "description": "Sentinel test session devlog viewer",
+  "main": "index.js",
+  "bin": { "sentinel-devlog": "./index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81"
+  },
+  "optionalDependencies": {
+    "md-to-pdf": "^5.2.4"
+  }
+}
