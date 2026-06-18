@@ -12,9 +12,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{hms, now_clock, short_hash, title_case, App, Mode};
+use crate::app::{hms, now_clock, short_hash, title_case, App, Focus, Mode};
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
@@ -31,8 +31,22 @@ pub fn render(f: &mut Frame, app: &App) {
     render_audit(f, chunks[3], app);
     render_footer(f, chunks[4], app);
 
+    // The override popup borrows `app` immutably; render it after the panes.
+
     if let Mode::Override { agent_id, input } = &app.mode {
         render_override(f, area, app, agent_id, input);
+    }
+}
+
+/// Border style for a pane: the focused pane gets a bright, bold border so it
+/// is obvious which pane `↑↓` is driving; unfocused panes keep the default.
+fn focus_border(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
     }
 }
 
@@ -50,7 +64,9 @@ fn render_header(f: &mut Frame, area: Rect) {
 }
 
 fn render_agents(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" AGENTS ");
+    let block = Block::bordered()
+        .title(" AGENTS ")
+        .border_style(focus_border(app.focus == Focus::Agents));
     if app.order.is_empty() {
         let msg = if app.connected {
             "No agents registered. Waiting for connections…"
@@ -97,13 +113,40 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Table::new(rows, widths).header(header).block(block), area);
 }
 
-fn render_signals(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" SIGNALS (last 10) ");
-    let lines: Vec<Line> = app
-        .signals
-        .iter()
-        .take(10)
-        .map(|s| {
+fn render_signals(f: &mut Frame, area: Rect, app: &mut App) {
+    // Content height inside the borders.
+    let vis = (area.height as usize).saturating_sub(2);
+    let len = app.signals.len();
+    // Clamp the offset to the last reachable window so scrolling stops cleanly
+    // at the oldest entry and never slices past the end.
+    let max_off = len.saturating_sub(vis);
+    if app.signal_offset > max_off {
+        app.signal_offset = max_off;
+    }
+    let offset = app.signal_offset;
+
+    let focused = app.focus == Focus::Signals;
+    let title = if len > vis {
+        let shown = len - offset;
+        let first = shown.saturating_sub(vis) + 1;
+        format!(" SIGNALS ({first}–{shown} of {len}) ")
+    } else {
+        " SIGNALS ".to_string()
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_style(focus_border(focused));
+
+    // Signals are stored newest-first. Render scrollback-style — oldest at the
+    // top of the window, newest at the bottom — so the default view shows the
+    // most recent signals and scrolling up reveals older ones. `offset` counts
+    // the newest entries scrolled off the bottom; index `i` is oldest-first
+    // within the window, mapping to deque entry `signals[len - 1 - i]`.
+    let end = len - offset;
+    let start = end.saturating_sub(vis);
+    let lines: Vec<Line> = (start..end)
+        .map(|i| {
+            let s = &app.signals[len - 1 - i];
             let (_, color) = action_style(&s.action);
             Line::from(vec![
                 Span::styled(format!("[{}] ", hms(&s.timestamp)), Style::default().fg(Color::DarkGray)),
@@ -126,13 +169,36 @@ fn render_signals(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(body).block(block), area);
 }
 
-fn render_audit(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" AUDIT (append-only) ");
-    let lines: Vec<Line> = app
-        .audit
-        .iter()
-        .take(6)
-        .map(|e| {
+fn render_audit(f: &mut Frame, area: Rect, app: &mut App) {
+    let vis = (area.height as usize).saturating_sub(2);
+    let len = app.audit.len();
+    let max_off = len.saturating_sub(vis);
+    if app.audit_offset > max_off {
+        app.audit_offset = max_off;
+    }
+    let offset = app.audit_offset;
+
+    let focused = app.focus == Focus::Audit;
+    let title = if len > vis {
+        let shown = (len - offset).min(len);
+        let first = shown.saturating_sub(vis) + 1;
+        format!(" AUDIT (append-only, {}–{} of {}) ", first, shown, len)
+    } else {
+        " AUDIT (append-only) ".to_string()
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_style(focus_border(focused));
+
+    // Audit is stored newest-first. Render scrollback-style — oldest at the top
+    // of the window, newest at the bottom — so `offset` counts the newest
+    // entries scrolled off the bottom. Index `i` is oldest-first within the
+    // window; the matching deque entry is `audit[len - 1 - i]`.
+    let end = len - offset;
+    let start = end.saturating_sub(vis);
+    let lines: Vec<Line> = (start..end)
+        .map(|i| {
+            let e = &app.audit[len - 1 - i];
             Line::from(vec![
                 Span::styled(format!("[{}] ", hms(&e.timestamp)), Style::default().fg(Color::DarkGray)),
                 Span::raw(format!("{:<18}", truncate(&e.target, 18))),
@@ -165,8 +231,16 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         ("● offline", Color::Red)
     };
+    // The `↑↓` hint reflects the focused pane: in AGENTS it selects an agent,
+    // elsewhere it scrolls the pane's history.
+    let scroll_hint = match app.focus {
+        Focus::Agents => "[↑↓] Select agent",
+        _ => "[↑↓] Scroll",
+    };
     let line = Line::from(vec![
-        Span::raw(" [Q] Quit  [O] Override  [R] Refresh  [↑↓] Select agent    "),
+        Span::raw(format!(
+            " [Q] Quit  [O] Override  [R] Refresh  [Tab] Switch pane  {scroll_hint}    "
+        )),
         Span::styled(conn_label, Style::default().fg(conn_color)),
         Span::styled(
             format!("  │  {}", app.status_line),

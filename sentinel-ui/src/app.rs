@@ -11,8 +11,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Signals retained for the rolling history panel.
-const SIGNAL_CAP: usize = 50;
 /// Audit entries retained for the audit panel.
 const AUDIT_CAP: usize = 50;
 
@@ -125,6 +123,25 @@ pub enum Mode {
     Override { agent_id: String, input: String },
 }
 
+/// Which panel currently receives `↑↓` input. `Tab` cycles through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Agents,
+    Signals,
+    Audit,
+}
+
+impl Focus {
+    /// Next pane in the Tab cycle: Agents → Signals → Audit → Agents.
+    fn next(self) -> Self {
+        match self {
+            Focus::Agents => Focus::Signals,
+            Focus::Signals => Focus::Audit,
+            Focus::Audit => Focus::Agents,
+        }
+    }
+}
+
 pub struct App {
     pub operator: String,
     pub connected: bool,
@@ -136,6 +153,13 @@ pub struct App {
     pub mode: Mode,
     pub status_line: String,
     pub should_quit: bool,
+    /// Pane currently receiving scroll input.
+    pub focus: Focus,
+    /// Number of newest signals scrolled out of view above the window.
+    pub signal_offset: usize,
+    /// Number of newest audit entries scrolled out of view below the window
+    /// (audit renders scrollback-style: newest at the bottom).
+    pub audit_offset: usize,
 }
 
 impl App {
@@ -151,6 +175,9 @@ impl App {
             mode: Mode::Normal,
             status_line: "connecting…".to_string(),
             should_quit: false,
+            focus: Focus::Agents,
+            signal_offset: 0,
+            audit_offset: 0,
         }
     }
 
@@ -182,10 +209,9 @@ impl App {
     }
 
     fn push_signal(&mut self, rec: SignalRec) {
+        // No retention cap: the panel keeps every signal received this session,
+        // and the scrollable view reveals the full history.
         self.signals.push_front(rec);
-        while self.signals.len() > SIGNAL_CAP {
-            self.signals.pop_back();
-        }
     }
 
     /// Apply an inbound event to dashboard state.
@@ -343,13 +369,43 @@ impl App {
                     self.status_line = "no agent selected".to_string();
                 }
             }
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
+            KeyCode::Tab => self.focus = self.focus.next(),
+            KeyCode::Up => self.scroll_up(),
+            KeyCode::Down => self.scroll_down(),
+            _ => {}
+        }
+    }
+
+    /// `↑` in the focused pane: select the previous agent, or scroll the
+    /// signals/audit scrollback up to reveal older entries.
+    fn scroll_up(&mut self) {
+        match self.focus {
+            Focus::Agents => self.selected = self.selected.saturating_sub(1),
+            Focus::Signals => {
+                let max = self.signals.len().saturating_sub(1);
+                self.signal_offset = (self.signal_offset + 1).min(max);
+            }
+            Focus::Audit => {
+                let max = self.audit.len().saturating_sub(1);
+                self.audit_offset = (self.audit_offset + 1).min(max);
+            }
+        }
+    }
+
+    /// `↓` in the focused pane: select the next agent, or scroll the
+    /// signals/audit scrollback down toward the most recent entries. The
+    /// precise bound depends on the rendered pane height, so the render pass
+    /// clamps these offsets to the visible window; here we only keep them
+    /// within the entry count.
+    fn scroll_down(&mut self) {
+        match self.focus {
+            Focus::Agents => {
                 if self.selected + 1 < self.order.len() {
                     self.selected += 1;
                 }
             }
-            _ => {}
+            Focus::Signals => self.signal_offset = self.signal_offset.saturating_sub(1),
+            Focus::Audit => self.audit_offset = self.audit_offset.saturating_sub(1),
         }
     }
 
@@ -500,6 +556,70 @@ mod tests {
         assert_eq!(app.signals.len(), 1);
         assert_eq!(app.audit.len(), 1);
         assert_eq!(app.audit[0].action, "SOFT_PAUSE");
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn tab_cycles_focus() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new("op".into());
+        assert_eq!(app.focus, Focus::Agents);
+        app.handle_key(press(KeyCode::Tab), &tx);
+        assert_eq!(app.focus, Focus::Signals);
+        app.handle_key(press(KeyCode::Tab), &tx);
+        assert_eq!(app.focus, Focus::Audit);
+        app.handle_key(press(KeyCode::Tab), &tx);
+        assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn signals_and_audit_keep_independent_offsets() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new("op".into());
+        for _ in 0..5 {
+            app.push_signal(SignalRec {
+                timestamp: "2026-05-16T10:44:08Z".into(),
+                agent_id: "a".into(),
+                signal: "repetition".into(),
+                score: 0.4,
+                action: "soft_pause".into(),
+            });
+            app.push_audit("SOFT_PAUSE", "a", "abcdef123456", "2026-05-16T10:44:08Z");
+        }
+
+        // Signals scrollback: ↑ reveals older, ↓ returns to newest, bounded.
+        app.focus = Focus::Signals;
+        app.handle_key(press(KeyCode::Up), &tx);
+        assert_eq!(app.signal_offset, 1);
+        assert_eq!(app.audit_offset, 0, "audit offset is independent of signals");
+        app.handle_key(press(KeyCode::Down), &tx);
+        assert_eq!(app.signal_offset, 0);
+        app.handle_key(press(KeyCode::Down), &tx);
+        assert_eq!(app.signal_offset, 0, "scroll-down stops at the newest entry");
+
+        // Audit scrollback advances its own offset, leaving signals untouched.
+        app.focus = Focus::Audit;
+        app.handle_key(press(KeyCode::Up), &tx);
+        assert_eq!(app.audit_offset, 1);
+        assert_eq!(app.signal_offset, 0);
+    }
+
+    #[test]
+    fn signals_have_no_retention_cap() {
+        let mut app = App::new("op".into());
+        for _ in 0..200 {
+            app.push_signal(SignalRec {
+                timestamp: "2026-05-16T10:44:08Z".into(),
+                agent_id: "a".into(),
+                signal: "repetition".into(),
+                score: 0.4,
+                action: "soft_pause".into(),
+            });
+        }
+        assert_eq!(app.signals.len(), 200, "every session signal is retained");
     }
 
     #[test]
