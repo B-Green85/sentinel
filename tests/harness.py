@@ -11,6 +11,7 @@ Requirements:
 """
 
 import json
+import re
 import time
 import hashlib
 import argparse
@@ -313,6 +314,37 @@ def run_suite(suite: dict) -> SuiteResult:
 
 # ─── Report ─────────────────────────────────────────────────────────────────────
 
+def safe_timestamp(ts_str: str) -> str:
+    """Filesystem-safe form of an ISO timestamp.
+
+    "2026-06-18T02:37:57.705333+00:00" -> "2026-06-18T02-37-57"
+    Colons (illegal in filenames on some systems) become hyphens; sub-second
+    precision and the timezone offset are dropped so one run maps to one name.
+    """
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2}):(\d{2})", ts_str)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}-{m.group(3)}-{m.group(4)}"
+    return ts_str.replace(":", "-")
+
+
+def save_results(out: dict, base: str = "sentinel_test_results") -> None:
+    """Write a timestamped archive plus the canonical latest copy.
+
+    The archive (``base_<timestamp>.json``) accumulates one file per run and is
+    never overwritten — the devlog viewer paginates through them. ``base.json``
+    is always rewritten with the latest run for backward compatibility with
+    anything that reads the canonical name.
+    """
+    stamp = safe_timestamp(out.get("timestamp") or ts())
+    archive = f"{base}_{stamp}.json"
+    payload = json.dumps(out, indent=2)
+    with open(archive, "w") as f:
+        f.write(payload)
+    with open(f"{base}.json", "w") as f:
+        f.write(payload)
+    print(f"\n  Full results saved to {base}.json and {archive}")
+
+
 def print_report(results: list[SuiteResult]) -> None:
     print(f"\n\n{'═'*60}")
     print("  SENTINEL TEST REPORT")
@@ -364,9 +396,7 @@ def print_report(results: list[SuiteResult]) -> None:
             for r in results
         ],
     }
-    with open("sentinel_test_results.json", "w") as f:
-        json.dump(out, f, indent=2)
-    print(f"\n  Full results saved to sentinel_test_results.json")
+    save_results(out)
 
 # ─── Entry ──────────────────────────────────────────────────────────────────────
 

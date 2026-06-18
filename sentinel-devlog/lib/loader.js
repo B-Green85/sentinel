@@ -11,16 +11,50 @@ const os = require('os');
 
 const DEFAULT_DIR = path.join(os.homedir(), 'Projects', 'sentinel');
 
-// sentinel_test_results.json, sentinel_neutral_results.json, and any other
-// sentinel_<name>_results.json the harness might write.
-const RESULT_RE = /^sentinel_.*results\.json$/;
+// Matches the canonical files (sentinel_test_results.json,
+// sentinel_neutral_results.json) AND the timestamped archives the harness
+// writes per run (sentinel_test_results_2026-06-17T04-40-51.json). The trailing
+// `.*` after `results` is what admits the `_<timestamp>` suffix.
+const RESULT_RE = /^sentinel_.*results.*\.json$/;
+
+// The two unversioned "latest run" filenames. A timestamped archive of the same
+// session supersedes these during deduplication.
+const CANONICAL = new Set(['sentinel_test_results.json', 'sentinel_neutral_results.json']);
 
 function isNeutral(file) {
-  return path.basename(file) === 'sentinel_neutral_results.json';
+  // Canonical neutral file or any sentinel_neutral_results_<timestamp>.json.
+  return path.basename(file).startsWith('sentinel_neutral_results');
+}
+
+function isCanonical(file) {
+  return CANONICAL.has(path.basename(file));
 }
 
 function isResultFile(file) {
   return RESULT_RE.test(path.basename(file));
+}
+
+/**
+ * Collapse sessions that describe the same run. The harness writes both a
+ * canonical `sentinel_test_results.json` and a timestamped archive with
+ * identical content; when both are present we keep the timestamped archive and
+ * drop the canonical so the viewer shows one session, not two. Keyed on the
+ * `timestamp` field (falling back to the filename when a session lacks one, so
+ * distinct timestamp-less files are never merged).
+ */
+function dedupeSessions(sessions) {
+  const byKey = new Map();
+  for (const s of sessions) {
+    const key = s.timestamp ? `ts:${s.timestamp}` : `file:${s._file}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, s);
+      continue;
+    }
+    // Same run via two files — prefer the timestamped (non-canonical) one.
+    byKey.set(key, isCanonical(existing._file) ? s : existing);
+  }
+  return Array.from(byKey.values());
 }
 
 function parseFile(file) {
@@ -56,6 +90,9 @@ function loadSessions(dir = DEFAULT_DIR) {
     }
     (session._kind === 'neutral' ? out.neutral : out.adversarial).push(session);
   }
+  // Collapse canonical/timestamped duplicates before ordering newest-first.
+  out.adversarial = dedupeSessions(out.adversarial);
+  out.neutral = dedupeSessions(out.neutral);
   const newestFirst = (a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || ''));
   out.adversarial.sort(newestFirst);
   out.neutral.sort(newestFirst);
@@ -132,7 +169,9 @@ module.exports = {
   loadSessions,
   parseFile,
   isNeutral,
+  isCanonical,
   isResultFile,
+  dedupeSessions,
   culpritTurn,
   suiteEvents,
   suiteStatus,

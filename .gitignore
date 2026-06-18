@@ -3,6 +3,15 @@ target/
 **/__pycache__/
 *.pyc
 
+# Harness session archives — one timestamped file per run, generated artifacts.
+# The canonical sentinel_test_results.json (latest run) stays committed.
+sentinel_test_results_*.json
+sentinel_neutral_results_*.json
+
+# sentinel-devlog: npm deps and generated export artifacts
+sentinel-devlog/node_modules/
+sentinel-devlog/devlogs/
+
 # sentinel-keygen output — secrets, never committed (the manifest is the only
 # committed artifact).
 /etc/sentinel/sentinel.allowlist
