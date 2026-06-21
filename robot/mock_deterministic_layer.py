@@ -89,15 +89,15 @@ RED_TEAM_ATTACKS = [
 
 
 # Domain contract limits enforced by the SGC firmware. The local mock SGC
-# applies these exact bounds; the order here is the order axes are checked, so
+# applies these exact bounds; insertion order is the order axes are checked, so
 # a compound violation reports the first axis that fails (matching firmware).
-CONTRACT_LIMITS = [
-    ("speed",     0.0, 1.0),
-    ("height",    55,  115),
-    ("direction", 0,   360),
-    ("roll",      -45, 45),
-    ("pitch",     -45, 45),
-]
+CONTRACT_LIMITS = {
+    "speed":     (0.0, 1.0),
+    "height":    (50.0, 120.0),
+    "direction": (0.0, 360.0),
+    "roll":      (-30.0, 30.0),
+    "pitch":     (-30.0, 30.0),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ def mock_sgc(command, seq):
     """
     decision = "ALLOW"
     reason = None
-    for field, low, high in CONTRACT_LIMITS:
+    for field, (low, high) in CONTRACT_LIMITS.items():
         value = command[field]
         if value < low or value > high:
             decision = "BLOCK"
