@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<!--
+  SGC Mission Control — UI
+  Copyright © 2026 Brandon Green. All rights reserved.
+  PRIVATE — Do not publish before provisional patent filed.
+
+  Defensive security research only.
+  Anthropic CVP Reference: b317987c-50db-4115-9219-4ece18b2db06
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGC Mission Control</title>
+<style>
+  :root {
+    --bg:        #0c0e12;
+    --panel:     #14171d;
+    --panel-2:   #1b1f27;
+    --border:    #2a2f3a;
+    --text:      #d7dce4;
+    --muted:     #7e8694;
+    --accent:    #5aa9ff;
+    --green:     #3ad17a;
+    --green-bg:  rgba(58, 209, 122, 0.10);
+    --red:       #ff5d5d;
+    --red-bg:    rgba(255, 93, 93, 0.10);
+    --hash:      #8b93a1;
+    --amber:     #f0b429;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin: 0;
+  }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .status {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--muted);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.on  { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.off { background: var(--red); }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  button, select {
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  button:hover:not(:disabled), select:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button.danger  { border-color: #5a2b2b; }
+  .sep { width: 1px; height: 26px; background: var(--border); margin: 0 4px; }
+  .group { display: flex; align-items: center; gap: 8px; }
+  .group label { color: var(--muted); font-size: 12px; }
+
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 16px 20px 20px;
+    gap: 14px;
+  }
+  #terminal {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: #07090d;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 12px 14px;
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #terminal.drag { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .line { padding: 0 4px; border-radius: 4px; }
+  .line.allow { color: var(--green); background: var(--green-bg); }
+  .line.block { color: var(--red);   background: var(--red-bg); }
+  .line.banner { color: var(--accent); font-weight: 600; margin-top: 6px; }
+  .line.meta { color: var(--muted); }
+  .line.err  { color: var(--amber); }
+  .hash { color: var(--hash); font-family: inherit; }
+
+  #summary {
+    display: none;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 14px 16px;
+  }
+  #summary.show { display: grid; }
+  .stat { display: flex; flex-direction: column; gap: 4px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .v.green { color: var(--green); }
+  .stat .v.red   { color: var(--red); }
+  .stat .v.verdict { font-size: 15px; }
+  .verdict.pass { color: var(--green); }
+  .verdict.fail { color: var(--red); }
+  .hint { color: var(--muted); font-size: 11.5px; padding: 0 2px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>SGC&nbsp;MISSION&nbsp;CONTROL</h1>
+    <span class="sub">LPC55S69 · domain contract enforcement</span>
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">connecting…</span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <button id="btnBuild">Build</button>
+    <button id="btnFlash" class="danger">Flash</button>
+    <div class="sep"></div>
+    <div class="group">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="dryrun">Dryrun</option>
+        <option value="normal">Normal</option>
+        <option value="redteam">Red Team</option>
+      </select>
+      <button id="btnRun" class="primary">Run</button>
+    </div>
+    <span class="hint">· drag <code>main.rs</code> onto the terminal to build</span>
+  </div>
+
+  <main>
+    <div id="summary">
+      <div class="stat"><span class="k">Total commands</span><span class="v" id="sTotal">—</span></div>
+      <div class="stat"><span class="k">Blocked</span><span class="v red" id="sBlocked">—</span></div>
+      <div class="stat"><span class="k">Allowed</span><span class="v green" id="sAllowed">—</span></div>
+      <div class="stat"><span class="k">Verdict</span><span class="v verdict" id="sVerdict">—</span></div>
+    </div>
+    <div id="terminal"></div>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+
+  const term      = document.getElementById("terminal");
+  const dot       = document.getElementById("dot");
+  const statusTxt = document.getElementById("statusText");
+  const summary   = document.getElementById("summary");
+  const sTotal    = document.getElementById("sTotal");
+  const sBlocked  = document.getElementById("sBlocked");
+  const sAllowed  = document.getElementById("sAllowed");
+  const sVerdict  = document.getElementById("sVerdict");
+
+  const btnBuild = document.getElementById("btnBuild");
+  const btnFlash = document.getElementById("btnFlash");
+  const btnRun   = document.getElementById("btnRun");
+  const modeSel  = document.getElementById("mode");
+  const actionBtns = [btnBuild, btnFlash, btnRun];
+
+  // ---- session accounting (per run) ----------------------------------
+  let session = null;
+  function resetSession(mode) {
+    session = { mode: mode, total: null, blocked: null, allowed: null,
+                liveBlocked: 0, liveAllowed: 0, verdict: null };
+    summary.classList.remove("show");
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+    });
+  }
+
+  function classifyLine(text) {
+    // Per-command verdict tokens are standalone words (e.g. "  ... BLOCK   reason=");
+    // summary words like BLOCKED/ALLOWED have a trailing letter and must NOT match.
+    if (/\bBLOCK\b/.test(text)) return "block";
+    if (/\bALLOW\b/.test(text)) return "allow";
+    return "";
+  }
+
+  function renderText(text) {
+    let html = escapeHtml(text);
+    // Hash values in monospace gray.
+    html = html.replace(/\bhash=([0-9a-fA-F]{6,})\b/g,
+      'hash=<span class="hash">$1</span>');
+    return html;
+  }
+
+  function appendLine(text, extraClass) {
+    const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
+    const div = document.createElement("div");
+    const cls = extraClass || classifyLine(text);
+    div.className = "line" + (cls ? " " + cls : "");
+    div.innerHTML = renderText(text);
+    term.appendChild(div);
+    if (atBottom) term.scrollTop = term.scrollHeight;
+  }
+
+  function parseSummary(text) {
+    if (!session) return;
+    let m;
+    if ((m = text.match(/\bBLOCK\b/)) && /seq=/.test(text)) session.liveBlocked++;
+    else if ((m = text.match(/\bALLOW\b/)) && /seq=/.test(text)) session.liveAllowed++;
+
+    if ((m = text.match(/Attack vectors sent\s*:\s*(\d+)/i))) session.total = +m[1];
+    if ((m = text.match(/Sent\s+(\d+)\s+in-contract/i)))      session.total = +m[1];
+    if ((m = text.match(/^\s*BLOCKED\s*:\s*(\d+)/i)))          session.blocked = +m[1];
+    if ((m = text.match(/^\s*ALLOWED\s*:\s*(\d+)/i)))          session.allowed = +m[1];
+    if ((m = text.match(/RESULT\s*:\s*(.+?)\s*$/i)))           session.verdict = m[1];
+  }
+
+  function showSummary() {
+    if (!session) return;
+    const total   = session.total   != null ? session.total
+                                            : (session.liveBlocked + session.liveAllowed);
+    const blocked = session.blocked != null ? session.blocked : session.liveBlocked;
+    const allowed = session.allowed != null ? session.allowed : session.liveAllowed;
+
+    sTotal.textContent   = total != null ? total : "—";
+    sBlocked.textContent = (session.mode === "normal" && session.blocked == null) ? "—" : blocked;
+    sAllowed.textContent = allowed;
+
+    let verdict = session.verdict;
+    if (!verdict) verdict = session.mode === "normal" ? "completed" : "—";
+    sVerdict.textContent = verdict;
+    sVerdict.className = "v verdict" +
+      (/pass/i.test(verdict) ? " pass" : /fail/i.test(verdict) ? " fail" : "");
+    summary.classList.add("show");
+  }
+
+  // ---- WebSocket stream ----------------------------------------------
+  // The control plane is HTTP on this page's port; the live stream is a
+  // separate websockets server on WS_PORT (the websockets lib only serves GET).
+  const WS_PORT = 8766;
+  let ws;
+  function connect() {
+    ws = new WebSocket("ws://" + location.hostname + ":" + WS_PORT + "/");
+    ws.onopen = function () {
+      dot.className = "dot on"; statusTxt.textContent = "connected";
+    };
+    ws.onclose = function () {
+      dot.className = "dot off"; statusTxt.textContent = "disconnected — retrying…";
+      setTimeout(connect, 1500);
+    };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+    ws.onmessage = function (ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+
+      if (msg.type === "start") {
+        appendLine("", null);
+        appendLine("$ " + (msg.cmd || msg.label), "banner");
+        if (msg.label && msg.label.indexOf("run:") === 0) {
+          resetSession(msg.label.slice(4));
+        }
+      } else if (msg.type === "line") {
+        const text = msg.text != null ? msg.text : "";
+        const cls = /^\[error\]/.test(text) ? "err" : null;
+        if (cls) appendLine(text, cls);
+        else appendLine(text);
+        parseSummary(text);
+      } else if (msg.type === "exit") {
+        appendLine("[" + msg.label + " exited with code " + msg.code + "]", "meta");
+        if (msg.label && msg.label.indexOf("run:") === 0) showSummary();
+        setBusy(false);
+      }
+    };
+  }
+
+  // ---- controls -------------------------------------------------------
+  function setBusy(busy) {
+    actionBtns.forEach(function (b) { b.disabled = busy; });
+  }
+
+  async function trigger(path, label, body) {
+    setBusy(true);
+    try {
+      const opts = { method: "POST" };
+      if (body) {
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        const body = await res.text();
+        appendLine("[" + label + " rejected: " + res.status + " " + body + "]", "err");
+        setBusy(false);
+      }
+      // success: output + re-enable arrive over the WebSocket ("exit").
+    } catch (e) {
+      appendLine("[" + label + " request failed: " + e + "]", "err");
+      setBusy(false);
+    }
+  }
+
+  btnBuild.addEventListener("click", function () { trigger("/build", "build"); });
+  btnFlash.addEventListener("click", function () { trigger("/flash", "flash"); });
+  btnRun.addEventListener("click", function () {
+    const mode = modeSel.value;
+    trigger("/run", "run", { mode: mode });
+  });
+
+  // ---- drag & drop main.rs -> build ----------------------------------
+  ["dragenter", "dragover"].forEach(function (evt) {
+    term.addEventListener(evt, function (e) {
+      e.preventDefault(); term.classList.add("drag");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (evt) {
+    term.addEventListener(evt, function (e) {
+      e.preventDefault(); term.classList.remove("drag");
+    });
+  });
+  term.addEventListener("drop", function (e) {
+    const files = e.dataTransfer && e.dataTransfer.files;
+    const names = files ? Array.from(files).map(function (f) { return f.name; }) : [];
+    const isRust = names.some(function (n) { return /(^|[\/\\])main\.rs$|\.rs$/i.test(n); });
+    if (isRust) {
+      appendLine("[dropped " + names.join(", ") + " → triggering build]", "meta");
+      trigger("/build", "build");
+    } else if (names.length) {
+      appendLine("[ignored drop: " + names.join(", ") + " — expected a .rs file]", "err");
+    }
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>
